@@ -4,6 +4,9 @@ import std;
 import sqlite;
 import http;
 import pages;
+import html;
+
+extern fn campfire_disconnected_before(out: u8[>..]&);
 
 fn same_origin(req: const http::Request&) -> bool {
     let site, has_site = http::field_of(req, "Sec-Fetch-Site");
@@ -17,7 +20,7 @@ fn same_origin(req: const http::Request&) -> bool {
 }
 
 fn post_message(db: sqlite::Db, req: const http::Request&, body: const u8[:], user: i64,
-                room_id: i64, now: const u8[:], out: u8[>..]&) -> i32 {
+                room_id: i64, now: const u8[:], key: const u8[:], out: u8[>..]&) -> i32 {
     guard same_origin(req) else { return 422; }
     let kind, has_kind = http::field_of(req, "Content-Type");
     guard has_kind && starts_with(kind, "application/x-www-form-urlencoded") else { return 415; }
@@ -33,10 +36,12 @@ fn post_message(db: sqlite::Db, req: const http::Request&, body: const u8[:], us
     var unread = sqlite::Stmt {};
     var message_id: i64 = 0;
     var status: i32 = 404;
+    var disconnected_before: u8[>..] = [];
+    campfire_disconnected_before(disconnected_before);
     let failed = sqlite::run() {
         sqlite::exec(db, "BEGIN IMMEDIATE");
         let transaction_errors = sqlite::transaction(db) {
-            q = sqlite::prepare(db, "SELECT r.type,u.name FROM rooms r JOIN memberships m ON m.room_id=r.id JOIN users u ON u.id=m.user_id WHERE r.id=? AND m.user_id=? AND u.status=0");
+            q = sqlite::prepare(db, "SELECT r.type,u.name,r.name FROM rooms r JOIN memberships m ON m.room_id=r.id JOIN users u ON u.id=m.user_id WHERE r.id=? AND m.user_id=? AND u.status=0");
             sqlite::bind_i64(q, 1, room_id);
             sqlite::bind_i64(q, 2, user);
             if sqlite::step(q) {
@@ -68,21 +73,19 @@ fn post_message(db: sqlite::Db, req: const http::Request&, body: const u8[:], us
                 sqlite::bind_text(touch, 1, now);
                 sqlite::bind_i64(touch, 2, room_id);
                 while sqlite::step(touch) {}
-                unread = sqlite::prepare(db, "UPDATE memberships SET unread_at=COALESCE(unread_at,?),updated_at=? WHERE room_id=? AND user_id<>?");
+                unread = sqlite::prepare(db, "UPDATE memberships SET unread_at=?,updated_at=? WHERE room_id=? AND user_id<>? AND involvement<>'invisible' AND (connected_at IS NULL OR connected_at<?)");
                 sqlite::bind_text(unread, 1, now);
                 sqlite::bind_text(unread, 2, now);
                 sqlite::bind_i64(unread, 3, room_id);
                 sqlite::bind_i64(unread, 4, user);
+                sqlite::bind_text(unread, 5, disconnected_before);
                 while sqlite::step(unread) {}
                 out.append("<turbo-stream action=\"append\" target=\"messages_rooms_");
                 out.append(if room_type == "Rooms::Open" { "open" } else if room_type == "Rooms::Closed" { "closed" } else { "direct" });
-                format(out, "_", room_id, "\"><template><article id=\"message_");
-                escape(out, client_id);
-                format(out, "\" data-message-id=\"", message_id, "\"><strong>");
-                escape(out, name);
-                out.append("</strong><div class=\"message__body\">");
-                escape(out, text);
-                out.append("</div></article></template></turbo-stream>");
+                format(out, "_", room_id, "\"><template>");
+                render_message(out, message_id, client_id, user, name, room_id, text_column(q, 2),
+                               now, now, rich_text, text, key);
+                out.append("</template></turbo-stream>");
                 status = 200;
             }
         };

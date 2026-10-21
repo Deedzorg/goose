@@ -43,7 +43,7 @@ def fixture(path):
                                created_at TEXT, updated_at TEXT, last_active_at TEXT);
         CREATE TABLE rooms (id INTEGER PRIMARY KEY, name TEXT, type TEXT, updated_at TEXT);
         CREATE TABLE memberships (room_id INTEGER, user_id INTEGER, involvement TEXT,
-                                  unread_at TEXT, updated_at TEXT);
+                                  unread_at TEXT, updated_at TEXT, connected_at TEXT);
         CREATE TABLE messages (id INTEGER PRIMARY KEY, room_id INTEGER, creator_id INTEGER,
                                client_message_id TEXT, created_at TEXT, updated_at TEXT);
         CREATE TABLE action_text_rich_texts (id INTEGER PRIMARY KEY, name TEXT, record_type TEXT,

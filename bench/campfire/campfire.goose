@@ -11,10 +11,14 @@ import messages;
 import sessions;
 import assets;
 import cache;
+import avatars;
+import signed_id;
 
 struct Settings {
     database: u8[..1024] = "campfire.sqlite3",
     cookie_key: u8[64] = [0; 64],
+    avatar_key: u8[64] = [0; 64],
+    storage: u8[..1024] = "storage",
     cache_enabled: bool = true,
     cache_diagnostics: bool = false,
 }
@@ -102,6 +106,15 @@ fn handle(db: sqlite::Db, entries: campfire::CachedPage[:], bytes: u8[:], state:
         http::respond(out, 405, "text/plain", "Method not allowed");
         return;
     }
+    if (req.method == "GET" || req.method == "HEAD") && starts_with(path, "/users/") && ends_with(path, "/avatar") {
+        var token: u8[>..] = [];
+        if http::decode(path[7..path.len - 7], token, false) {
+            var now: u8[>..] = [];
+            campfire_now(now);
+            campfire::avatar(db, req, token, settings.avatar_key, settings.storage, now, out);
+        } else { http::respond(out, 404, "text/plain", "Not found"); }
+        return;
+    }
     if req.method != "POST" && campfire::cached_page(entries, bytes, state, user, req, out) { return; }
     var html: u8[>..] = [];
     var status: i32 = 200;
@@ -113,7 +126,7 @@ fn handle(db: sqlite::Db, entries: campfire::CachedPage[:], bytes: u8[:], state:
             var search: u8[>..] = [];
             let raw, has_query = http::query_of(req.target, "q");
             if has_query && http::decode(raw, search, true) {
-                campfire::search(db, user, search, html);
+                campfire::search(db, user, search, settings.avatar_key, html);
             } else {
                 status = 400;
             }
@@ -127,13 +140,13 @@ fn handle(db: sqlite::Db, entries: campfire::CachedPage[:], bytes: u8[:], state:
                 if req.method == "POST" && messages {
                     var now: u8[>..] = [];
                     campfire_sql_now(now);
-                    status = campfire::post_message(db, req, body, user, room, now, html);
+                    status = campfire::post_message(db, req, body, user, room, now, settings.avatar_key, html);
                     posted = true;
                 } else if req.method == "POST" {
                     status = 405;
                 } else {
                     let before, has_before = http::query_int(req.target, "before");
-                    status = campfire::room(db, user, room, if has_before { before } else { 0 }, messages, html);
+                    status = campfire::room(db, user, room, if has_before { before } else { 0 }, messages, settings.avatar_key, html);
                 }
             } else {
                 status = 404;
@@ -219,6 +232,12 @@ fn main() {
     var secret: u8[>..] = [];
     guard env("SECRET_KEY_BASE", secret) && secret.len >= 32 else { abort("set SECRET_KEY_BASE to the database's Rails signing secret"); }
     settings.cookie_key = campfire::signed_cookie_key(secret);
+    settings.avatar_key = campfire::signed_id_key(secret);
+    var storage: u8[>..] = [];
+    if env("STORAGE_PATH", storage) {
+        guard storage.len > 0 && storage.len <= 1024 else { abort("STORAGE_PATH is too long or empty"); }
+        settings.storage = storage;
+    }
     var cache_text: u8[>..] = [];
     if env("CAMPFIRE_CACHE", cache_text) { settings.cache_enabled = cache_text != "0"; }
     var diagnostics: u8[>..] = [];

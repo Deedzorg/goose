@@ -6,9 +6,12 @@ This is a protocol/database integration check, not full UI parity or a benchmark
 """
 
 import argparse
+import base64
 import concurrent.futures
 from contextlib import closing
 import gzip
+import hashlib
+import hmac
 import html
 import http.client
 import json
@@ -22,6 +25,8 @@ import tempfile
 import time
 from urllib.parse import urlencode
 import uuid
+import xml.etree.ElementTree as ET
+from test_html import message_text
 
 
 def message_ids(body):
@@ -30,9 +35,16 @@ def message_ids(body):
 
 def check_messages(body, expected):
     assert message_ids(body) == [row[0] for row in expected], "message window differs from SQL"
-    rendered = re.findall(r'<article\b[^>]*data-message-id="(\d+)"[^>]*>.*?'
-                          r'<div class="message__body">(.*?)</div></article>', body, re.S)
-    assert [(int(mid), html.unescape(text)) for mid, text in rendered] == expected, "message bodies differ from SQL"
+    assert message_text(body) == [(mid, " ".join(text.split())) for mid, text in expected], "message bodies differ from SQL"
+
+
+def signed_user(secret, user, purpose="user/avatar", expiry=None, legacy=False):
+    rails = {"pur": purpose, "exp": expiry}
+    rails["message" if legacy else "data"] = base64.b64encode(json.dumps(user).encode()).decode() if legacy else user
+    serialized = json.dumps({"_rails": rails}, separators=(",", ":")).encode()
+    payload = base64.b64encode(serialized) if legacy else base64.urlsafe_b64encode(serialized).rstrip(b"=")
+    key = hashlib.pbkdf2_hmac("sha256", secret.encode(), b"active_record/signed_id", 1000, 64)
+    return payload.decode() + "--" + hmac.new(key, payload, hashlib.sha1 if legacy else hashlib.sha256).hexdigest()
 
 
 def main():
@@ -40,7 +52,7 @@ def main():
     parser.add_argument("executable", type=Path)
     parser.add_argument("seed", type=Path, help="unmodified output of once-campfire-verification/bin/seed")
     parser.add_argument("--no-cache", action="store_true")
-    parser.add_argument("--loadgen", type=Path, help="also enforce the shared room HTML contract; fails until rendering is compatible")
+    parser.add_argument("--loadgen", type=Path, help="also enforce the shared room HTML contract")
     args = parser.parse_args()
     executable, seed = args.executable.resolve(), args.seed.resolve()
     labels = json.loads((seed / "labels.json").read_text())
@@ -58,26 +70,29 @@ def main():
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         env = dict(os.environ, DATABASE_PATH=str(database), SECRET_KEY_BASE=environment["SECRET_KEY_BASE"],
-                   PORT=str(port), CAMPFIRE_CACHE="0" if args.no_cache else "1")
+                   PORT=str(port), STORAGE_PATH=str(seed / "storage"), CAMPFIRE_CACHE="0" if args.no_cache else "1")
         with (work / "server.log").open("w+") as log:
             server = subprocess.Popen([str(executable)], env=env, stdout=log, stderr=log,
                                       creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             credential = ""
 
-            def request(path, data=None, authenticated=True):
+            def request(path, data=None, authenticated=True, extra_headers=None, method=None, binary=False):
                 conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
                 headers = {"Accept-Encoding": "gzip"}
                 if authenticated:
                     headers["Cookie"] = credential
                 if data is not None:
                     headers.update({"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"})
+                if extra_headers:
+                    headers.update(extra_headers)
+                verb = method or ("GET" if data is None else "POST")
                 try:
-                    conn.request("GET" if data is None else "POST", path, body=data, headers=headers)
+                    conn.request(verb, path, body=data, headers=headers)
                     response = conn.getresponse()
                     body = response.read()
-                    if response.getheader("Content-Encoding") == "gzip":
+                    if verb != "HEAD" and response.getheader("Content-Encoding") == "gzip":
                         body = gzip.decompress(body)
-                    return response.status, dict(response.getheaders()), body.decode()
+                    return response.status, dict(response.getheaders()), body if binary else body.decode()
                 finally:
                     conn.close()
 
@@ -123,11 +138,44 @@ def main():
                     status, _, body = request("/users/me/sidebar")
                     assert status == 200 and 'id="shared_rooms"' in body
                     for name, in db.execute("SELECT r.name FROM rooms r JOIN memberships m ON m.room_id=r.id "
-                                           "WHERE m.user_id=? AND r.type='Rooms::Open' AND m.involvement<>'invisible'", (user,)):
+                                           "WHERE m.user_id=? AND r.type<>'Rooms::Direct' AND m.involvement<>'invisible'", (user,)):
                         assert html.escape(name, quote=True) in body
                     denied_room = db.execute("SELECT id FROM rooms WHERE id NOT IN (SELECT room_id FROM memberships WHERE user_id=?) LIMIT 1", (user,)).fetchone()[0]
                     assert request(f"/rooms/{denied_room}")[0] == 404
                     print("PASS: shared room, pagination, search and sidebar agree with independent SQL; membership enforced", flush=True)
+
+                    avatar = f'/users/{labels["avatar_tokens.jason"]}/avatar'
+                    status, headers, pixels = request(avatar, binary=True)
+                    assert status == 200 and headers["Content-Type"].startswith("image/webp")
+                    keys = db.execute("SELECT b.key FROM active_storage_attachments a JOIN active_storage_variant_records v ON v.blob_id=a.blob_id "
+                                      "JOIN active_storage_attachments va ON va.record_type='ActiveStorage::VariantRecord' AND va.record_id=v.id "
+                                      "JOIN active_storage_blobs b ON b.id=va.blob_id WHERE a.record_type='User' AND a.name='avatar' "
+                                      "AND a.record_id=? AND b.content_type='image/webp'", (labels["users.jason"],)).fetchall()
+                    assert len(keys) == 1
+                    image_key = keys[0][0]
+                    assert pixels == (seed / "storage" / image_key[:2] / image_key[2:4] / image_key).read_bytes()
+                    decoded = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-show_entries",
+                                              "stream=width,height,nb_read_frames", "-of", "json", "-i", "pipe:0"], input=pixels, capture_output=True)
+                    diagnostics = decoded.stderr.decode().splitlines()
+                    assert decoded.returncode == 0 and all(re.fullmatch(r"\[webp @ 0x[0-9a-f]+\] invalid TIFF header in (?:EXIF|Exif) data(?:: Invalid data found when processing input)?", line) for line in diagnostics)
+                    assert any(s.get("width", 0) > 0 and s.get("height", 0) > 0 and int(s.get("nb_read_frames", 0)) > 0
+                               for s in json.loads(decoded.stdout)["streams"])
+                    assert request(avatar, method="HEAD", binary=True)[2] == b""
+                    assert request(avatar, extra_headers={"If-None-Match": headers["ETag"]}, binary=True)[0] == 304
+                    for legacy in (False, True):
+                        token = signed_user(environment["SECRET_KEY_BASE"], labels["users.jason"], legacy=legacy)
+                        assert request(f"/users/{token}/avatar", binary=True)[2] == pixels
+                    invalid = [
+                        labels["avatar_tokens.jason"][:-1] + ("a" if labels["avatar_tokens.jason"][-1] != "a" else "b"),
+                        signed_user(environment["SECRET_KEY_BASE"], labels["users.jason"], purpose="user/transfer"),
+                        signed_user(environment["SECRET_KEY_BASE"], labels["users.jason"], expiry="2000-01-01T00:00:00.000Z"),
+                        signed_user(environment["SECRET_KEY_BASE"], 999999999999),
+                    ]
+                    for token in invalid:
+                        assert request(f"/users/{token}/avatar", binary=True)[0] == 404
+                    status, _, svg = request(f'/users/{labels["avatar_tokens.david"]}/avatar')
+                    assert status == 200 and ET.fromstring(svg).find("{http://www.w3.org/2000/svg}text").text == "D"
+                    print("PASS: exact stored avatar pixels decode; Rails and legacy signed IDs, purpose/expiry/tampering, initials, HEAD and ETag", flush=True)
 
                     initial_count = db.execute("SELECT count(*) FROM messages").fetchone()[0]
                     initial_touch = db.execute("SELECT updated_at FROM rooms WHERE id=?", (write_room,)).fetchone()[0]
@@ -157,6 +205,20 @@ def main():
                     assert db.execute("SELECT updated_at FROM rooms WHERE id=?", (write_room,)).fetchone()[0] != initial_touch
                     assert set(message_ids(request(f"/searches?q={run}")[2])) == {mid for mid, _, _ in acknowledged}
                     print("PASS: 32 concurrent acknowledgements have distinct IDs and exact message, Action Text and FTS rows; room touched", flush=True)
+
+                    sentinel = "2001-01-01 00:00:00.000000"
+                    invisible, connected, disconnected = [labels[f"users.{name}"] for name in ("jason", "jz", "kevin")]
+                    db.execute("UPDATE memberships SET unread_at=? WHERE room_id=?", (sentinel, write_room))
+                    db.execute("UPDATE memberships SET involvement='invisible',connected_at=NULL WHERE room_id=? AND user_id=?", (write_room, invisible))
+                    db.execute("UPDATE memberships SET involvement='mentions',connected_at='2099-01-01 00:00:00.000000' WHERE room_id=? AND user_id=?", (write_room, connected))
+                    db.execute("UPDATE memberships SET involvement='mentions',connected_at=? WHERE room_id=? AND user_id=?", (sentinel, write_room, disconnected))
+                    db.commit()
+                    mid, _, _ = post(32)
+                    posted_at = db.execute("SELECT created_at FROM messages WHERE id=?", (mid,)).fetchone()[0]
+                    unread = dict(db.execute("SELECT user_id,unread_at FROM memberships WHERE room_id=?", (write_room,)))
+                    assert unread[disconnected] == posted_at
+                    assert all(unread[member] == sentinel for member in (user, invisible, connected))
+                    print("PASS: posts replace disconnected members' unread timestamp and preserve author, invisible and connected state", flush=True)
 
                     db.executescript("CREATE TRIGGER campfire_test_failure BEFORE INSERT ON action_text_rich_texts "
                                      "BEGIN SELECT RAISE(ABORT,'test rollback'); END;")

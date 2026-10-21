@@ -21,6 +21,7 @@ import tempfile
 import time
 
 from test_server import cookie, fixture
+from test_html import message_text
 
 
 def affinity():
@@ -107,8 +108,7 @@ def main():
                             raise RuntimeError("server did not become ready")
                         text = body.decode()
                         assert list(map(int, re.findall(r'data-message-id="(\d+)"', text))) == expected_ids
-                        rendered = re.findall(r'<article\b[^>]*data-message-id="(\d+)"[^>]*>.*?<div class="message__body">(.*?)</div></article>', text, re.S)
-                        assert [(int(message_id), html.unescape(value)) for message_id, value in rendered] == messages
+                        assert message_text(text) == [(mid, " ".join(value.split())) for mid, value in messages]
                         assert text.startswith("<!DOCTYPE html>") and text.endswith("</html>")
                         if canonical is None:
                             canonical = body

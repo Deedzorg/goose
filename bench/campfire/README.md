@@ -2,9 +2,9 @@
 
 This is a partial Campfire implementation on `codex/campfire-experiment`.
 The experiment is rebased onto `master` at `d9573d81`, which fixes the
-HTTP-package compiler regression. There is no measured Rust/Jai comparison
-and no claim of feature parity. The cache timings below use the repaired
-compiler and the schema-compatible write path.
+HTTP-package compiler regression. Goose, Rust and the published Jai image now
+pass all eight shared HTTP preflight contracts, including decoded avatars and
+audited message writes. This does not establish full application parity.
 The files are contained under `bench/campfire` so the experiment can be moved to
 its own repository later. It is not on `master`.
 
@@ -61,10 +61,19 @@ measurements, not measurements from this prototype.
 The server listens on loopback with four workers and a SQLite connection per
 worker. It implements signed Rails-style session cookies, active-user checks,
 Linux bcrypt login, room membership checks, the latest 40 messages and older
-windows, FTS search, an open-room sidebar, gzip responses and plain-text posting.
+windows, FTS search, a visible-shared-room sidebar, gzip responses and plain-text posting.
 Writes update messages, Action Text, FTS, the room timestamp and membership
 unread state in a transaction before acknowledging success. A small browser UI
 polls for new messages.
+
+Messages use the reference message/presentation element structure and render
+stored Action Text through a conservative HTML allowlist. Unknown tags and
+attributes are removed, links are restricted, text is escaped and retained tags
+are balanced. Signed avatar IDs enforce purpose and expiry; stored square WebP
+variants are served with content type, length, ETag and HEAD support. Users
+without an image get an initials SVG. Unread timestamps are replaced for
+disconnected, visible members other than the author; recent connections and
+invisible memberships retain their state.
 
 Each worker caches up to 128 pages and 16 MiB of URL/plain/gzip data, with a 1 MiB
 limit per entry. Keys contain the authenticated user ID and complete request
@@ -97,17 +106,20 @@ Tests use operating-system temporary storage for the database; `--fixture-root`
 selects another filesystem. A Linux run on the Windows-mounted `/mnt/c` filesystem
 failed some concurrent writes with `SQLITE_BUSY` at the one-second lock timeout.
 The server returns an error for those unacknowledged writes. Storage latency and
-write contention still need characterization before any performance comparison.
+write contention depend on the filesystem. The shared comparison uses native
+WSL temporary storage for all implementations.
 
-This is not a full Rails replacement: only plain message text is rendered;
-rich formatting, attachments and Action Cable/WebSocket delivery are unsupported.
-Account administration, uploads, notifications and the wider UI are not
-implemented. Unread updates also need the reference application's visibility,
-connection-age and timestamp semantics. There is no TLS
-configuration or deployment setup. Windows password login returns 501; signed
-sessions still work. Browser automation and the official shared benchmark have
-not passed or been run to completion. The simpler rendered pages make a timing
-comparison misleading until compatibility is completed and verified.
+This is not a full Rails replacement. Rich formatting supports a subset of HTML;
+attachments, mentions, media unfurls, Action Cable/WebSocket delivery, account
+administration, uploads, notifications and the wider UI are not implemented.
+POST accepts plain text, not the complete rich-text editor protocol. Image
+avatars require an existing preprocessed WebP variant and return 501 if it is
+missing; on-demand image transformation is not implemented. Bot fallback SVGs
+are simpler than Rails'. There is no TLS configuration or deployment setup.
+Windows password login returns 501; signed sessions still work. Browser/UI
+parity has not been established. Shared HTTP validation supports a scoped
+workload comparison, not a claim that these applications do equivalent work
+outside those contracts or that a measured difference comes from the language.
 
 ## Shared Rails fixture checks
 
@@ -126,9 +138,12 @@ disabled, it passes bcrypt login, exact SQL-derived room/pagination/search
 windows and plain text, sidebar visibility, denied room access, 32 concurrent
 writes with exact message/Action Text/FTS rows, room timestamp updates, rollback
 after an injected database failure, and access revocation after foreign commits.
-These checks exposed and now cover the real schema's absence of a
-`rooms.messages_count` column. The synthetic fixture uses the same room schema
-for that write path.
+They also check retained rich text, exact stored avatar bytes and actual image
+decoding, independently signed current/legacy avatar IDs, invalid signatures,
+purpose and expiry, initials, HEAD and ETag. Another write checks disconnected,
+recently connected, invisible and author membership timestamps independently.
+The real schema has no `rooms.messages_count` column; both fixture tests use
+that schema for the write path.
 
 Inside the Linux toolchain container, using an existing seed:
 
@@ -142,15 +157,15 @@ python3 bench/campfire/test_shared.py bench/campfire/build/campfire \
 These are checks of the implemented protocol and database behavior, not full
 Campfire parity. Adding `--loadgen /path/to/loadgen` also runs the shared
 verification project's unmodified room validator with SQL-derived expected
-identities and content. That stricter check currently exits unsuccessfully:
-zero valid responses, with `incorrect message window` because the validator
-requires the reference message `<div>` structure while this prototype emits
-`<article>`. Per-message presentation elements are also missing; avatars return
-404. There is no exact-body override for this shared-fixture validation.
-Those compatibility failures must be resolved before a cross-language timing
-comparison. Logs are under the repository-root `build/campfire/` directory as
-`shared-seed-cache-on.log`, `shared-seed-cache-off.log` and
-`shared-room-contract.log`.
+identities and content. The full preflight in `benchmark_shared.py` passes all
+eight routes for all three servers: room, pagination, sidebar, search, avatar,
+CSS, health and POST. It uses unmodified `contracts.rb`, the shared load
+generator's route validator and `validate_acks.rb`. No exact-body override
+replaces the message contracts. Avatar preflight uses the verification
+project's real image decoder. Every acknowledged write is audited against SQL.
+Logs are under the repository-root `build/campfire/` directory as
+`shared-final-on.log`, `shared-final-off.log` and `shared-preflight-3.log`;
+the complete preflight receipt is `bench/campfire/build/shared-preflight-3/`.
 
 ## Dependencies
 
@@ -255,20 +270,12 @@ Changing to `reusable[]` would primarily affect cache misses, memory use and
 eviction-heavy traffic. It would not itself remove work from the repeated-hit
 path measured below.
 
-With the compiler blocker resolved, the next server work is completing
-rendering compatibility, then running the common correctness and write audits
-before comparing implementations. This includes complete message presentation,
-rich text and attachments, real avatars, and the shared fixture's result windows
-and persisted-write checks; a simpler page is not an equivalent workload.
-Any comparison must use the same fixture, workload, compression, CPU/memory
-limits and machine for Goose, Rust and the published Jai binary.
-Run both repeated reads and the shared profile with ten writes per second, and
-record latency, CPU use and memory alongside validated throughput. Pin all
-implementation revisions rather than comparing against figures from another
-machine. Only then profile and prioritize changes: per-hit SQLite work, shared
-handle-table locking, response copying and cache behavior under writes are
-current candidates, not demonstrated bottlenecks. A faster replay path must
-still enforce database-generation changes, cookie expiry and permissions.
+The shared HTTP contracts now pass. Profiling should guide further performance
+work: per-hit SQLite work, shared handle-table locking, response copying and
+cache behavior under writes are candidates, not demonstrated bottlenecks. A
+faster replay path must still enforce database-generation changes, cookie
+expiry and permissions. Remaining UI and attachment work is separate from the
+validated HTTP workload.
 
 ## Build and test
 
@@ -280,8 +287,8 @@ docker run --rm -v "$PWD:/workspace" goose-campfire-toolchain sh bench/campfire/
 ```
 
 The script prepares SQLite, builds the compiler, checks the HTTP-package
-reproducer, builds the server, then runs the integration, HMAC and reduced
-cache-API checks. Build outputs and downloaded packages are ignored. Windows
+reproducer, builds the server, then runs the integration, HMAC, rich-text
+sanitizer and reduced cache-API checks. Build outputs and downloaded packages are ignored. Windows
 users can run these commands in WSL from the
 repository's `/mnt/c/...` path.
 
@@ -300,7 +307,8 @@ python bench/campfire/repro/check.py build/campfire/compiler/Release/goose.exe
 
 To run manually, use a disposable copy of a Campfire SQLite database and set
 `DATABASE_PATH` to it, `SECRET_KEY_BASE` to that database's Rails signing secret,
-and optionally `PORT` (default 3000). Run the built executable on its target OS.
+`STORAGE_PATH` to its Active Storage files, and optionally `PORT` (default 3000).
+Run the built executable on its target OS.
 The program opens an existing database; the integration test creates and cleans
 up its own fixture automatically. The prototype writes to whichever database it
 is given.
@@ -309,7 +317,45 @@ is given.
 `CAMPFIRE_CACHE_DIAGNOSTICS=1` for `X-Campfire-Cache: hit/miss` on cached-format
 HTML responses; diagnostics are disabled by default and during measurements.
 
-## Cache comparison
+## Shared comparison
+
+`benchmark_shared.py` runs all implementations on the same machine, with fresh
+copies of the same Rails seed, gzip, four server cores, four separate generator
+cores and a 2 GiB container limit. Three rounds rotate server order. Each route
+gets a two-second warmup followed by eight seconds at 16 persistent clients.
+The baseline measures room, pagination, sidebar, search and POST. The mixed
+profile reads a room while the shared writer posts ten messages per second in
+another room. Source/image/executable hashes, payload sizes, raw latencies,
+generator CPU and write audits are retained. Server CPU/memory are recorded
+when the container exposes supported cgroup counters.
+
+Any transport error, invalid response, missing/duplicate write, failed SQL
+audit or changed source seed fails the entire run. Only a report with
+`metadata.complete: true` is accepted. The runner never modifies the shared
+verification sources. It requires the Linux repository and runtime directory
+to have the same absolute paths in the runner and Docker host. For this machine:
+
+```sh
+mkdir -p /tmp/goose-campfire-comparison
+docker run --rm --network host \
+  -v /mnt/c/W/goose:/mnt/c/W/goose \
+  -v /tmp/goose-campfire-comparison:/tmp/goose-campfire-comparison \
+  -v /usr/bin/docker:/usr/local/bin/docker:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --workdir /mnt/c/W/goose goose-campfire-toolchain:latest \
+  python3 bench/campfire/benchmark_shared.py \
+  --verification build/campfire/reference/verification \
+  --seed build/campfire/reference/shared-seed \
+  --runtime-root /tmp/goose-campfire-comparison \
+  --output bench/campfire/build/shared-comparison-1
+```
+
+Add `--preflight-only` for validation without timing. Use a new output directory
+for every run. Published defaults are Rust `main` (resolved to an immutable
+image before starting) and Jai `e56ba63`, the image linked by its README;
+unpublished Jai changes are outside this comparison.
+
+## Historical cache comparison
 
 `benchmark_cache.py` measures only this prototype against itself. It uses the
 shared verification project's Rust HTTP load generator, a synthetic 100-message
@@ -319,7 +365,8 @@ and exact per-message text against SQL, then every measured response must match
 the complete decoded bytes. Raw reports include the executable hash, CPU sets,
 latencies and response validation counts and stay under ignored `build/`.
 
-On 2026-10-21, with compiler `d9573d81` on an AMD Ryzen 9 9950X3D under WSL2,
+Before the shared rendering/avatar work, on 2026-10-21, with compiler
+`d9573d81` on an AMD Ryzen 9 9950X3D under WSL2,
 three five-second rounds produced these results. Server affinity was CPUs
 0/2/4/6 and load-generator affinity 8/10/12/14, using separate cores as reported
 by the guest topology.

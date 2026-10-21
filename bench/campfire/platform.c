@@ -9,10 +9,10 @@
 
 typedef struct { const uint8_t *data; int64_t len; } campfire_bytes;
 
-static void campfire_timestamp(gs_rref out, int sql, int future) {
+static void campfire_timestamp(gs_rref out, int sql, int future, int seconds_ago) {
     struct timespec instant;
     if (!timespec_get(&instant, TIME_UTC)) return;
-    time_t now = instant.tv_sec;
+    time_t now = instant.tv_sec - seconds_ago;
     struct tm utc;
 #ifdef _WIN32
     if (gmtime_s(&utc, &now)) return;
@@ -34,9 +34,10 @@ static void campfire_timestamp(gs_rref out, int sql, int future) {
     gs_bld_append(out, text, (int64_t)length);
 }
 
-void campfire_now(gs_rref out) { campfire_timestamp(out, 0, 0); }
-void campfire_sql_now(gs_rref out) { campfire_timestamp(out, 1, 0); }
-void campfire_expiry(gs_rref out) { campfire_timestamp(out, 0, 1); }
+void campfire_now(gs_rref out) { campfire_timestamp(out, 0, 0, 0); }
+void campfire_sql_now(gs_rref out) { campfire_timestamp(out, 1, 0, 0); }
+void campfire_expiry(gs_rref out) { campfire_timestamp(out, 0, 1, 0); }
+void campfire_disconnected_before(gs_rref out) { campfire_timestamp(out, 1, 0, 60); }
 
 int32_t campfire_password_verify(campfire_bytes password, campfire_bytes digest) {
 #ifdef _WIN32
