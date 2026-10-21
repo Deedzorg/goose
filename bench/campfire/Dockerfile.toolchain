@@ -1,0 +1,7 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git clang cmake ninja-build python3 liburing-dev \
+    libssl-dev libcrypt-dev ruby ruby-minitest sqlite3 ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
