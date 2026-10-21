@@ -1,10 +1,43 @@
 # Campfire in Goose: experimental prototype
 
-This is a runnable, partial Campfire implementation on `codex/campfire-experiment`.
-It has a bounded response cache that works with the unchanged Goose compiler at
-`8511ae34`. There is no measured Rust/Jai comparison and no claim of feature parity.
+This is a partial Campfire implementation on `codex/campfire-experiment`.
+Its bounded response cache was built, tested and measured with compiler
+`8511ae34`. The branch is now rebased onto `master` at `a17e84d8`; that compiler
+exposes the HTTP-package build blocker below. There is no measured Rust/Jai
+comparison and no claim of feature parity.
 The files are contained under `bench/campfire` so the experiment can be moved to
 its own repository later. It is not on `master`.
+
+## Current build blocker
+
+Compiler `a17e84d8` rejects goose-http `v0.4.3` at `uring.goose:329`:
+
+```text
+cannot call h2_answer: it shrinks h2fields while h is still used,
+and h may refer into h2fields (§5.1)
+```
+
+The preceding master, `f605b5a0`, successfully typechecks the complete server
+at O2. After the holder-reference cherry-pick, even the minimal server in
+`repro/http_compatibility.goose` is rejected. It contains no Campfire code or
+cache. This is an integration regression introduced by the compiler change;
+whether the rejected path is actually unsafe still needs a smaller analysis
+of the reference effects. Runtime HTTP/1.1 configuration does not avoid
+typechecking this HTTP/2 path.
+
+Performance work is paused. The preferred next step is to reduce and correct
+the compiler regression, retaining the safety rejection tests and adding this
+external-package check. Alternatives are restructuring the HTTP package's
+scratch-buffer ownership, or using a compatible compiler for the experiment
+temporarily. No safety checks have been disabled and no package files were
+patched to suppress the error. The measurements below belong to the earlier
+working compiler and have not been repeated on this rebased branch.
+
+The integrated compiler passed 1,261 parse/type checks, 599 native checks,
+692 JIT checks and 1,923 rejection checks, plus the other baseline sections.
+One command-line path check initially failed because the copied test tree and
+the compiler's tree differed; rerunning that check in the matching layout
+passed. All three reduced cache APIs also build and run at O0/O1/O2.
 
 ## Context
 
@@ -93,17 +126,18 @@ Application routing, signing, queries and rendering are Goose. `platform.c` is a
 small UTC-clock/libcrypt bcrypt adapter; SQLite, HTTP OS interfaces and hashing
 also use the external packages' native components.
 
-## Reproduce the limitation
+## Reference-analysis regression checks
 
-Tested with compiler commit `8511ae34`, at `-O0`, `-O1` and `-O2` on Windows and
-Linux. No external package is needed by the reduced examples:
+The original issue was reproduced with compiler `8511ae34` at O0/O1/O2 on
+Windows and Linux. The three reduced cache APIs require no external package.
+With the integrated compiler, they now all build and execute their assertions:
 
 ```sh
-goose check bench/campfire/repro/field_reference.goose
 python3 bench/campfire/repro/check.py /path/to/goose
 ```
 
-The first command is expected to fail:
+For the historical compiler, add `--expect-limitation`. That mode expects
+`field_reference.goose` to produce this diagnostic and executes the two controls:
 
 ```text
 cannot clear reusable pool unrelated (which cache.bytes may point at):
@@ -113,8 +147,8 @@ its slots stay live for the freelist (§5.4)
 `Cache.bytes` actually points to a separate ordinary local byte array, and there
 is no assignment or call that makes it point to `unrelated`. In the server the
 unrelated pool is goose-http's `gathered` request-body storage. A helper receiving
-`Cache&` loses enough information about the field's referent to admit that pool
-as a candidate, so shrinking is rejected. This follows the conservative
+`Cache&` lost enough information about the field's referent to admit that pool
+as a candidate, so shrinking was rejected. This followed the conservative
 read-back-root rules for reference parameters in specification §9.5; it is a
 precision limitation, not evidence of an unsafe compiled program or a measured
 performance ceiling.
@@ -126,9 +160,9 @@ cleared and the unrelated pool retains all four bytes:
 - `value_holder.goose` passes the small `Cache` holder by value. This copies the
   reference, not the buffer; clearing still affects the caller's byte array.
 
-The reduced examples preserve the issue without making the server fail to build.
+The reduced examples preserve the original issue and now test its resolution.
 The full HTTP callback also produced conservative alias errors with a by-value
-holder and with direct parameters to grow-only arrays. The runnable cache uses
+holder and with direct parameters to grow-only arrays. The bounded cache uses
 fixed buffers and scalar offsets, so it does not depend on improving those cases.
 
 ## Reference-analysis approaches
@@ -142,35 +176,55 @@ fixed buffers and scalar offsets, so it does not depend on improving those cases
 2. **Improve Goose's reference analysis.** Preserve per-field referents through
    aggregate reference parameters and calls. Keep rejecting real aliases to
    reusable pools, including rebinding and aliases introduced in loops. The
-   independent branch `codex/compiler-field-roots`, commit `76200a27`, implements
-   a narrower improvement: a referenced holder whose contents share one exact
+   change from `76200a27` was cherry-picked onto `master` as `a17e84d8`, and its
+   source branch was deleted. It implements a narrower improvement: a
+   referenced holder whose contents share one exact
    root retains that root across calls. The original reduced `Cache&` example
    now runs at O0 and O2. Holders containing several roots remain conservative,
    and the full HTTP callback's Reply/entries alias errors are unchanged. This
-   compiler change is not a dependency of the server branch. Its full Linux
-   baseline passed, with new rejection cases for actual aliases, rebindings,
+   compiler change is included in the rebased server branch, whose bounded
+   cache does not require it. Its Linux baseline checks passed, with new
+   rejection cases for actual aliases, rebindings,
    callbacks, loops, live references and growth hazards. Windows Defender
    quarantined the new Windows compiler; final compiler validation used Linux,
    without changing security settings.
-3. **Use a reusable pool/offset-based cache.** Recycle allocated runs instead of
-   shrinking a referenced grow-only array. This needs explicit ownership,
-   eviction and stale-offset handling. It is more invasive than the first option.
+3. **Use the existing `reusable[]` slice pool for cache storage.** `alloc_slice`,
+   `free_slice` and `realloc_slice` already implement run allocation, reuse and
+   coalescing. No custom free-list allocator is needed. The application still
+   owns cache keys, byte limits, eviction and invalidation. Offsets are optional;
+   slices can be kept directly, provided a freed entry is no longer served.
 
 For example, a byte arena could hold page A at `[0, 2000)` and page B at
 `[2000, 5000)`. Evicting A records its 2,000 bytes as free; a new 1,200-byte page
-can reuse the beginning, leaving an 800-byte free run. Entries store offsets and
-lengths rather than long-lived slices. Generation numbers or explicit ownership
-prevent stale entries from naming recycled data. The underlying array retains
+can reuse the beginning, leaving an 800-byte free run. This is precisely the
+allocation behavior of `reusable[]`. Generation numbers or explicit ownership
+prevent stale entries from naming recycled data. Goose keeps a stale slice
+memory-safe, but it can observe a later occupant's bytes; cache correctness is
+still the application's responsibility. The underlying array retains
 its allocation and only grows when no suitable free run remains. A sender that
 keeps a reference into the arena must delay recycling until transmission ends;
 the current HTTP package copies the response into its output buffer. The bounded
 cache here uses the simpler variant: reset the entire arena when full, with no
 individual eviction or free-list allocator.
 
-The next server work is completing rendering compatibility, then running the
-common correctness and write audits before comparing implementations.
+Changing to `reusable[]` would primarily affect cache misses, memory use and
+eviction-heavy traffic. It would not itself remove work from the repeated-hit
+path measured below.
+
+After resolving the compiler blocker, the next server work is completing
+rendering compatibility, then running the common correctness and write audits
+before comparing implementations. This includes complete message presentation,
+rich text and attachments, real avatars, and the shared fixture's result windows
+and persisted-write checks; a simpler page is not an equivalent workload.
 Any comparison must use the same fixture, workload, compression, CPU/memory
 limits and machine for Goose, Rust and the published Jai binary.
+Run both repeated reads and the shared profile with ten writes per second, and
+record latency, CPU use and memory alongside validated throughput. Pin all
+implementation revisions rather than comparing against figures from another
+machine. Only then profile and prioritize changes: per-hit SQLite work, shared
+handle-table locking, response copying and cache behavior under writes are
+current candidates, not demonstrated bottlenecks. A faster replay path must
+still enforce database-generation changes, cookie expiry and permissions.
 
 ## Build and test
 
