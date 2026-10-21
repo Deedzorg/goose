@@ -361,13 +361,96 @@ docker run --rm --network host \
   --verification build/campfire/reference/verification \
   --seed build/campfire/reference/shared-seed \
   --runtime-root /tmp/goose-campfire-comparison \
-  --output bench/campfire/build/shared-comparison-1
+  --output bench/campfire/build/shared-comparison-new
 ```
 
 Add `--preflight-only` for validation without timing. Use a new output directory
 for every run. Published defaults are Rust `main` (resolved to an immutable
 image before starting) and Jai `e56ba63`, the image linked by its README;
 unpublished Jai changes are outside this comparison.
+
+### Measured results, 2026-10-21
+
+The completed receipt is `bench/campfire/build/shared-comparison-2/summary.json`.
+It records a clean Goose revision `f8d28251bf1a47e63287afbf2764505d9bf49855`,
+unmodified verification revision `ec02debb3e44f40b8778a6a42db3c4515b2f9eaf`,
+and executable SHA-256
+`31dbad741231eebc24458bcb1dd245eb257db96e4bcc68200d84ce993b4f9056`.
+Rust was revision `6dae2fd3c1a2dce61ca11beb731bcce2b42b67ad`, image
+`sha256:98ba156f688c3fe856afd71655f613a6620bc03754f456ed2ef08fb2e5527e6e`.
+Jai was published tag `e56ba63`, image
+`sha256:014651a89f16953fab46cc3f322019d932d37ff1a098d98fb71bdf2e976caf92`.
+Fixture, generator, validator and toolchain image hashes are in the receipt.
+
+The machine was an AMD Ryzen 9 9950X3D under WSL2 Ubuntu. Each server used
+CPUs 0/2/4/6 and the generator used 8/10/12/14, separate cores according to the
+guest topology. All used native WSL database storage, host networking, gzip,
+the same 2 GiB limit and the settings above. The runner measured one server at
+a time; this task ran no builds during the measurements.
+
+All 54 timed samples passed. Including warmups and preflights, the generator
+validated **33,261,762 responses** with zero transport errors or invalid
+responses. The shared audit verified **360,912 acknowledged writes**: 94,852
+Goose, 111,214 Rust and 154,846 Jai. Each of the 18 disposable databases passed
+additional row-count, FTS, Action Text and SQLite integrity checks. The source
+seed and executable were unchanged. The mixed writer targeted ten posts/s and
+acknowledged 79 posts in each eight-second timed sample.
+
+Median valid requests per second across three rounds:
+
+| Workload | Goose | Rust | Jai |
+| --- | ---: | ---: | ---: |
+| Room | 160,361 | 28,169 | 67,471 |
+| Older messages | 166,429 | 27,720 | 68,780 |
+| Sidebar | 166,741 | 29,285 | 70,561 |
+| Search | 160,512 | 29,368 | 70,150 |
+| POST message | 2,992 | 3,848 | 5,102 |
+| Room with ten posts/s in another room | 162,413 | 26,254 | 66,622 |
+
+The room ratio is 5.69x Rust and 2.38x Jai; mixed-room ratios are 6.19x and
+2.44x. Goose's write rate is only 0.78x Rust and 0.59x Jai. Room rates in order
+of each application's rounds were Goose 168,545 / 160,361 / 146,750; Rust
+28,169 / 28,496 / 27,917; Jai 70,537 / 67,471 / 63,591. These short runs have
+visible variation; the mixed result being slightly higher than baseline for
+Goose is not evidence that adding writes makes it faster.
+
+Median per-run latency and sampled resource use:
+
+| Metric | Goose | Rust | Jai |
+| --- | ---: | ---: | ---: |
+| Room p99, ms | 0.242 | 1.179 | 0.489 |
+| POST p99, ms | 9.471 | 9.239 | 7.879 |
+| Mixed room p99, ms | 0.251 | 1.440 | 0.536 |
+| Server CPU cores used, room | 1.95 | 3.32 | 2.82 |
+| Anonymous resident MiB after room | 147.3 | 22.1 | 43.2 |
+| Anonymous resident MiB after POST | 150.5 | 91.7 | 107.7 |
+
+Memory is a cgroup sample after the route, not peak or total resident memory;
+CPU is the cgroup counter delta around the sample. Generator CPU for room reads
+was about 3.15 / 1.15 / 1.91 cores respectively. These are measurements at
+16 clients, not proven maximum capacity or a sustained production-load result.
+
+**This establishes a lead on the contract-tested reads, not equivalent full
+applications or an intrinsic language advantage.** The rendered room was
+51,038 decoded bytes for Goose versus 416,121 for both other servers. Compressed
+body sizes were 6,019 / 24,230 / 20,630 bytes respectively. Sidebar and search
+also omit much of the complete UI. The shared contracts validate message
+windows, text, structure and route behavior, not every action or UI element.
+Goose's missing features listed above and greater memory use remain material.
+
+The first comparison attempt failed closed on one Goose SQLite lock timeout
+during sustained POST and is excluded. The FIFO gate then passed two separate
+20-second write stress rounds. After aligning SQLite settings, the complete
+comparison above passed; regression tests also verify a successful write after
+an injected transaction failure. Local logs are `build/campfire/writer-final-tests.log`
+and `build/campfire/shared-comparison-2.log` at the repository root. Raw data and
+audit bodies stay ignored.
+
+The next useful work is completing the missing rendering/UI behavior for a
+stronger parity claim, and profiling the serialized write path. Prepared
+statement reuse, rendering after the database critical section and background
+WAL checkpoints are concrete candidates; these measurements do not isolate
+their individual costs. No new compiler blocker was encountered.
 
 ## Historical cache comparison
 
