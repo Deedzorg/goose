@@ -64,7 +64,7 @@ fn post_message(db: sqlite::Db, req: const http::Request&, body: const u8[:], us
                 sqlite::bind_i64(index, 1, message_id);
                 sqlite::bind_text(index, 2, text);
                 while sqlite::step(index) {}
-                touch = sqlite::prepare(db, "UPDATE rooms SET updated_at=?,messages_count=messages_count+1 WHERE id=?");
+                touch = sqlite::prepare(db, "UPDATE rooms SET updated_at=? WHERE id=?");
                 sqlite::bind_text(touch, 1, now);
                 sqlite::bind_i64(touch, 2, room_id);
                 while sqlite::step(touch) {}

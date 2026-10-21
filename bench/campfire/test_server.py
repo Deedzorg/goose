@@ -41,8 +41,7 @@ def fixture(path):
         CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, status INTEGER, email_address TEXT, password_digest TEXT);
         CREATE TABLE sessions (id INTEGER PRIMARY KEY, user_id INTEGER, token TEXT,
                                created_at TEXT, updated_at TEXT, last_active_at TEXT);
-        CREATE TABLE rooms (id INTEGER PRIMARY KEY, name TEXT, type TEXT,
-                            updated_at TEXT, messages_count INTEGER DEFAULT 0);
+        CREATE TABLE rooms (id INTEGER PRIMARY KEY, name TEXT, type TEXT, updated_at TEXT);
         CREATE TABLE memberships (room_id INTEGER, user_id INTEGER, involvement TEXT,
                                   unread_at TEXT, updated_at TEXT);
         CREATE TABLE messages (id INTEGER PRIMARY KEY, room_id INTEGER, creator_id INTEGER,

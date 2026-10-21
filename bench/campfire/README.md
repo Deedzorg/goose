@@ -1,43 +1,43 @@
 # Campfire in Goose: experimental prototype
 
 This is a partial Campfire implementation on `codex/campfire-experiment`.
-Its bounded response cache was built, tested and measured with compiler
-`8511ae34`. The branch is now rebased onto `master` at `a17e84d8`; that compiler
-exposes the HTTP-package build blocker below. There is no measured Rust/Jai
-comparison and no claim of feature parity.
+The experiment is rebased onto `master` at `d9573d81`, which fixes the
+HTTP-package compiler regression. There is no measured Rust/Jai comparison
+and no claim of feature parity. The cache timings below use the repaired
+compiler and the schema-compatible write path.
 The files are contained under `bench/campfire` so the experiment can be moved to
 its own repository later. It is not on `master`.
 
-## Current build blocker
+## Compiler status
 
-Compiler `a17e84d8` rejects goose-http `v0.4.3` at `uring.goose:329`:
+Compiler `a17e84d8` rejected goose-http `v0.4.3` at `uring.goose:329`:
 
 ```text
 cannot call h2_answer: it shrinks h2fields while h is still used,
 and h may refer into h2fields (§5.1)
 ```
 
-The preceding master, `f605b5a0`, successfully typechecks the complete server
-at O2. After the holder-reference cherry-pick, even the minimal server in
-`repro/http_compatibility.goose` is rejected. It contains no Campfire code or
-cache. This is an integration regression introduced by the compiler change;
-whether the rejected path is actually unsafe still needs a smaller analysis
-of the reference effects. Runtime HTTP/1.1 configuration does not avoid
-typechecking this HTTP/2 path.
+The preceding master, `f605b5a0`, typechecked the complete server at O2. The
+regression also affected the minimal server in `repro/http_compatibility.goose`,
+which contains no Campfire code or cache. Nested helper stores lost the
+annotation that a reference came from a holder's contents. A later call then
+treated the holder as an arbitrary lifetime bound, admitting unrelated scratch
+buffers as possible aliases.
 
-Performance work is paused. The preferred next step is to reduce and correct
-the compiler regression, retaining the safety rejection tests and adding this
-external-package check. Alternatives are restructuring the HTTP package's
-scratch-buffer ownership, or using a compatible compiler for the experiment
-temporarily. No safety checks have been disabled and no package files were
-patched to suppress the error. The measurements below belong to the earlier
-working compiler and have not been repeated on this rebased branch.
+The repair was cherry-picked separately onto `master` as `d9573d81`; its source
+branch was deleted and this experiment rebased. It preserves the contents
+annotation so call sites can consult actual stores. Dependency-free regressions
+cover nested helpers and callbacks; real aliases and loop-carried rebindings
+remain rejected. Neither safety checks nor HTTP-package sources were weakened.
+This repair does not change the separate dynamic-cache limitations below.
 
-The integrated compiler passed 1,261 parse/type checks, 599 native checks,
-692 JIT checks and 1,923 rejection checks, plus the other baseline sections.
-One command-line path check initially failed because the copied test tree and
-the compiler's tree differed; rerunning that check in the matching layout
-passed. All three reduced cache APIs also build and run at O0/O1/O2.
+The repaired compiler passed the full Linux baseline: 1,263 parse/type checks,
+600 native checks, 693 JIT checks and 1,925 rejection checks, plus all remaining
+sections with the usual unavailable-backend/module skips. Both the minimal HTTP
+server and complete Campfire server passed O2 checks and native builds. The
+build script also checks the minimal HTTP case before building the application.
+Local validation receipts are under `build/campfire/compiler-holder-http/` at
+the repository root.
 
 ## Context
 
@@ -62,9 +62,9 @@ The server listens on loopback with four workers and a SQLite connection per
 worker. It implements signed Rails-style session cookies, active-user checks,
 Linux bcrypt login, room membership checks, the latest 40 messages and older
 windows, FTS search, an open-room sidebar, gzip responses and plain-text posting.
-Writes update messages, Action Text, FTS, room counts and membership unread state
-in a transaction before acknowledging success. A small browser UI polls for new
-messages.
+Writes update messages, Action Text, FTS, the room timestamp and membership
+unread state in a transaction before acknowledging success. A small browser UI
+polls for new messages.
 
 Each worker caches up to 128 pages and 16 MiB of URL/plain/gzip data, with a 1 MiB
 limit per entry. Keys contain the authenticated user ID and complete request
@@ -102,11 +102,55 @@ write contention still need characterization before any performance comparison.
 This is not a full Rails replacement: only plain message text is rendered;
 rich formatting, attachments and Action Cable/WebSocket delivery are unsupported.
 Account administration, uploads, notifications and the wider UI are not
-implemented. There is no TLS
+implemented. Unread updates also need the reference application's visibility,
+connection-age and timestamp semantics. There is no TLS
 configuration or deployment setup. Windows password login returns 501; signed
 sessions still work. Browser automation and the official shared benchmark have
 not passed or been run to completion. The simpler rendered pages make a timing
 comparison misleading until compatibility is completed and verified.
+
+## Shared Rails fixture checks
+
+The prototype now runs against a real shared fixture generated by the unmodified
+verification `bin/seed`, using Rails revision
+`90b330024dec3e757c79b6a7e6568f93da8e3148` and verification revision
+`ec02debb3e44f40b8778a6a42db3c4515b2f9eaf`. The local reference image is
+`goose-campfire-reference:90b3300`. Its exported Dockerfile uses an equivalent
+root-owned `COPY` plus `chmod` for hooks because the local legacy builder lacks
+`COPY --chmod`; application and seed code were unchanged. Seed files and
+disposable credentials remain in ignored build storage.
+
+`test_shared.py` opens the source database read-only and uses SQLite backup to
+make a disposable copy in native temporary storage. With caching enabled and
+disabled, it passes bcrypt login, exact SQL-derived room/pagination/search
+windows and plain text, sidebar visibility, denied room access, 32 concurrent
+writes with exact message/Action Text/FTS rows, room timestamp updates, rollback
+after an injected database failure, and access revocation after foreign commits.
+These checks exposed and now cover the real schema's absence of a
+`rooms.messages_count` column. The synthetic fixture uses the same room schema
+for that write path.
+
+Inside the Linux toolchain container, using an existing seed:
+
+```sh
+python3 bench/campfire/test_shared.py bench/campfire/build/campfire \
+  build/campfire/reference/shared-seed
+python3 bench/campfire/test_shared.py bench/campfire/build/campfire \
+  build/campfire/reference/shared-seed --no-cache
+```
+
+These are checks of the implemented protocol and database behavior, not full
+Campfire parity. Adding `--loadgen /path/to/loadgen` also runs the shared
+verification project's unmodified room validator with SQL-derived expected
+identities and content. That stricter check currently exits unsuccessfully:
+zero valid responses, with `incorrect message window` because the validator
+requires the reference message `<div>` structure while this prototype emits
+`<article>`. Per-message presentation elements are also missing; avatars return
+404. There is no exact-body override for this shared-fixture validation.
+Those compatibility failures must be resolved before a cross-language timing
+comparison. Logs are under the repository-root `build/campfire/` directory as
+`shared-seed-cache-on.log`, `shared-seed-cache-off.log` and
+`shared-room-contract.log`.
 
 ## Dependencies
 
@@ -211,7 +255,7 @@ Changing to `reusable[]` would primarily affect cache misses, memory use and
 eviction-heavy traffic. It would not itself remove work from the repeated-hit
 path measured below.
 
-After resolving the compiler blocker, the next server work is completing
+With the compiler blocker resolved, the next server work is completing
 rendering compatibility, then running the common correctness and write audits
 before comparing implementations. This includes complete message presentation,
 rich text and attachments, real avatars, and the shared fixture's result windows
@@ -235,9 +279,10 @@ docker build -t goose-campfire-toolchain -f bench/campfire/Dockerfile.toolchain 
 docker run --rm -v "$PWD:/workspace" goose-campfire-toolchain sh bench/campfire/build_linux.sh
 ```
 
-The script prepares SQLite, builds the compiler and server, then runs the
-integration, HMAC and compiler-reproducer checks. Build outputs and downloaded
-packages are ignored. Windows users can run these commands in WSL from the
+The script prepares SQLite, builds the compiler, checks the HTTP-package
+reproducer, builds the server, then runs the integration, HMAC and reduced
+cache-API checks. Build outputs and downloaded packages are ignored. Windows
+users can run these commands in WSL from the
 repository's `/mnt/c/...` path.
 
 Native Windows build (Python 3, Git, CMake and a supported C/C++ compiler on PATH):
@@ -274,21 +319,24 @@ and exact per-message text against SQL, then every measured response must match
 the complete decoded bytes. Raw reports include the executable hash, CPU sets,
 latencies and response validation counts and stay under ignored `build/`.
 
-On 2026-10-21, using an AMD Ryzen 9 9950X3D under WSL2, three five-second rounds
-produced these results. Server affinity was CPUs 0/2/4/6 and load-generator
-affinity 8/10/12/14, using separate cores as reported by the guest topology.
+On 2026-10-21, with compiler `d9573d81` on an AMD Ryzen 9 9950X3D under WSL2,
+three five-second rounds produced these results. Server affinity was CPUs
+0/2/4/6 and load-generator affinity 8/10/12/14, using separate cores as reported
+by the guest topology.
 
 | Mode | Requests/second, three rounds | Median |
 | --- | --- | --- |
-| Cache disabled | 33,644.5 / 38,673.3 / 40,469.5 | 38,673.3 |
-| Cache enabled | 143,356.5 / 150,972.3 / 150,762.1 | 150,762.1 |
+| Cache disabled | 41,061.5 / 40,600.5 / 32,031.6 | 40,600.5 |
+| Cache enabled | 165,022.6 / 158,125.7 / 161,423.5 | 161,423.5 |
 
-The ratio of medians was **3.90x**. All measured responses passed validation,
+The ratio of medians was **3.98x**. All measured responses passed validation,
 with zero transport errors or invalid responses. The decoded page was 8,334
 bytes and the reported average response size was 1,529 bytes in both modes.
 The executable SHA-256 was
-`00224d13dca0714fb0b57c99450dc1b6c536c874af76b73130ac222a589c5ee2`.
-The local receipt is `build/cache-benchmark.json`. This short repeated-read
+`6d009c6b23869a3b6f315dad3f9cfc39e949bdcd68322ef7da32814135312ce8`.
+The local receipt is `build/cache-benchmark-landed.json`. The previous build
+with compiler `8511ae34` measured a 3.90x cache ratio; the new run does not
+isolate a compiler-speed effect. This short repeated-read
 measurement does not characterize mixed users, writes, eviction-heavy traffic
 or tail latency over a sustained run.
 
