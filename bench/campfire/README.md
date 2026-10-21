@@ -1,9 +1,10 @@
-# Campfire in Goose: prototype and compiler limitation
+# Campfire in Goose: experimental prototype
 
-This is a runnable, partial Campfire implementation. Porting and optimization are
-stopped at a reproducible Goose reference-analysis limitation, as requested for
-this experiment. There is no measured Rust/Jai comparison and no claim of feature
-parity or a performance win. The compiler is unchanged.
+This is a runnable, partial Campfire implementation on `codex/campfire-experiment`.
+It has a bounded response cache that works with the unchanged Goose compiler at
+`8511ae34`. There is no measured Rust/Jai comparison and no claim of feature parity.
+The files are contained under `bench/campfire` so the experiment can be moved to
+its own repository later. It is not on `master`.
 
 ## Context
 
@@ -32,11 +33,32 @@ Writes update messages, Action Text, FTS, room counts and membership unread stat
 in a transaction before acknowledging success. A small browser UI polls for new
 messages.
 
+Each worker caches up to 128 pages and 16 MiB of URL/plain/gzip data, with a 1 MiB
+limit per entry. Keys contain the authenticated user ID and complete request
+target. Buffers are passed directly; entries contain offsets into a fixed byte
+array. Invalidation resets counters, so no live array needs to shrink. A full
+cache starts a new generation rather than individually evicting pages.
+
+Each cached read opens a SQLite read transaction, checks `PRAGMA data_version`,
+then authenticates and reads the page within that snapshot. A change made by any
+other connection invalidates the whole worker cache. Local writes invalidate it
+both before and after the handler. The most recent verified session is also
+cached within that database generation, keyed by the exact signed cookie and
+bounded by its expiry. No TTL delays session revocation or room-access changes.
+The pinned SQLite implementation executes `OP_Transaction` before reading its
+data-version cookie; see `sqlite3.c`'s `PragTyp_HEADER_VALUE` and
+`sqlite3BtreeGetMeta`. SQLite documents the version's per-connection scope and
+its exclusion of local writes in [PRAGMA data_version](https://www.sqlite.org/pragma.html#pragma_data_version).
+
 The independent Python integration test creates a synthetic database, generates
 cookies independently and checks decoded output, denied access, concurrent reads,
 32 concurrent acknowledged writes, exact persisted bodies, rollback after an
 injected SQL failure, and access revocation after another connection edits the
 database. It passes on Windows and Linux; bcrypt login is exercised on Linux.
+The same checks run with caching disabled. Cache-specific checks verify actual
+hits, identity/gzip equality, cross-user isolation, cookie expiry, revocation,
+external content changes, local SQL-trigger changes and entry eviction. A
+separate small-buffer test checks byte-capacity eviction and oversized entries.
 The HMAC-SHA1 vector test also covers the cookie-signing primitive separately.
 Tests use operating-system temporary storage for the database; `--fixture-root`
 selects another filesystem. A Linux run on the Windows-mounted `/mnt/c` filesystem
@@ -104,28 +126,49 @@ cleared and the unrelated pool retains all four bytes:
 - `value_holder.goose` passes the small `Cache` holder by value. This copies the
   reference, not the buffer; clearing still affects the caller's byte array.
 
-The failed caching integration is absent from the runnable server. The reduced
-examples preserve the issue without making the prototype fail to build.
+The reduced examples preserve the issue without making the server fail to build.
+The full HTTP callback also produced conservative alias errors with a by-value
+holder and with direct parameters to grow-only arrays. The runnable cache uses
+fixed buffers and scalar offsets, so it does not depend on improving those cases.
 
-## Options before resuming
+## Reference-analysis approaches
 
 1. **Adapt the cache API to current Goose.** Pass array references directly, or
    pass a small holder of references by value, with mutable scalar metadata
    handled separately. Both reduced forms are verified. This is the smallest
-   route back to the server experiment. The complete cache still needs lifetime,
-   eviction and cross-worker invalidation tests; the controls do not prove it.
+   route back to the server experiment. The full callback needed fixed buffers
+   and logical lengths as well; the reduced controls alone did not establish
+   that the complete cache could shrink its arrays.
 2. **Improve Goose's reference analysis.** Preserve per-field referents through
    aggregate reference parameters and calls. Keep rejecting real aliases to
-   reusable pools, including rebinding and aliases introduced in loops. This
-   would allow the original encapsulated cache API, but is compiler work needing
-   dedicated positive and negative tests.
+   reusable pools, including rebinding and aliases introduced in loops. The
+   independent branch `codex/compiler-field-roots`, commit `76200a27`, implements
+   a narrower improvement: a referenced holder whose contents share one exact
+   root retains that root across calls. The original reduced `Cache&` example
+   now runs at O0 and O2. Holders containing several roots remain conservative,
+   and the full HTTP callback's Reply/entries alias errors are unchanged. This
+   compiler change is not a dependency of the server branch. Its full Linux
+   baseline passed, with new rejection cases for actual aliases, rebindings,
+   callbacks, loops, live references and growth hazards. Windows Defender
+   quarantined the new Windows compiler; final compiler validation used Linux,
+   without changing security settings.
 3. **Use a reusable pool/offset-based cache.** Recycle allocated runs instead of
    shrinking a referenced grow-only array. This needs explicit ownership,
    eviction and stale-offset handling. It is more invasive than the first option.
 
-The next server work, after choosing an approach, is response caching with
-correct invalidation and permission checks, completing rendering compatibility,
-then running the common correctness and write audits before measuring throughput.
+For example, a byte arena could hold page A at `[0, 2000)` and page B at
+`[2000, 5000)`. Evicting A records its 2,000 bytes as free; a new 1,200-byte page
+can reuse the beginning, leaving an 800-byte free run. Entries store offsets and
+lengths rather than long-lived slices. Generation numbers or explicit ownership
+prevent stale entries from naming recycled data. The underlying array retains
+its allocation and only grows when no suitable free run remains. A sender that
+keeps a reference into the arena must delay recycling until transmission ends;
+the current HTTP package copies the response into its output buffer. The bounded
+cache here uses the simpler variant: reset the entire arena when full, with no
+individual eviction or free-list allocator.
+
+The next server work is completing rendering compatibility, then running the
+common correctness and write audits before comparing implementations.
 Any comparison must use the same fixture, workload, compression, CPU/memory
 limits and machine for Goose, Rust and the published Jai binary.
 
@@ -152,6 +195,7 @@ cmake --build build/campfire/compiler --config Release --parallel 4
 $env:GOOSE_HOME = Join-Path $PWD 'build/campfire/home'
 & build/campfire/compiler/Release/goose.exe build -o bench/campfire/build/campfire.exe bench/campfire/campfire.goose
 python bench/campfire/test_server.py bench/campfire/build/campfire.exe
+python bench/campfire/test_server.py bench/campfire/build/campfire.exe --no-cache
 python bench/campfire/repro/check.py build/campfire/compiler/Release/goose.exe
 ```
 
@@ -161,3 +205,47 @@ and optionally `PORT` (default 3000). Run the built executable on its target OS.
 The program opens an existing database; the integration test creates and cleans
 up its own fixture automatically. The prototype writes to whichever database it
 is given.
+
+`CAMPFIRE_CACHE=0` disables response and session caching. Set
+`CAMPFIRE_CACHE_DIAGNOSTICS=1` for `X-Campfire-Cache: hit/miss` on cached-format
+HTML responses; diagnostics are disabled by default and during measurements.
+
+## Cache comparison
+
+`benchmark_cache.py` measures only this prototype against itself. It uses the
+shared verification project's Rust HTTP load generator, a synthetic 100-message
+room, 16 persistent clients, gzip, disjoint CPU affinity sets, one-second warmups
+and alternating cache-off/on rounds. Preflight independently checks message IDs
+and exact per-message text against SQL, then every measured response must match
+the complete decoded bytes. Raw reports include the executable hash, CPU sets,
+latencies and response validation counts and stay under ignored `build/`.
+
+On 2026-10-21, using an AMD Ryzen 9 9950X3D under WSL2, three five-second rounds
+produced these results. Server affinity was CPUs 0/2/4/6 and load-generator
+affinity 8/10/12/14, using separate cores as reported by the guest topology.
+
+| Mode | Requests/second, three rounds | Median |
+| --- | --- | --- |
+| Cache disabled | 33,644.5 / 38,673.3 / 40,469.5 | 38,673.3 |
+| Cache enabled | 143,356.5 / 150,972.3 / 150,762.1 | 150,762.1 |
+
+The ratio of medians was **3.90x**. All measured responses passed validation,
+with zero transport errors or invalid responses. The decoded page was 8,334
+bytes and the reported average response size was 1,529 bytes in both modes.
+The executable SHA-256 was
+`00224d13dca0714fb0b57c99450dc1b6c536c874af76b73130ac222a589c5ee2`.
+The local receipt is `build/cache-benchmark.json`. This short repeated-read
+measurement does not characterize mixed users, writes, eviction-heavy traffic
+or tail latency over a sustained run.
+
+With the verification load generator already built, run inside the Linux
+toolchain container:
+
+```sh
+python3 bench/campfire/benchmark_cache.py bench/campfire/build/campfire \
+  build/campfire/reference/verification/loadgen/target/release/loadgen
+```
+
+This is not the shared Campfire fixture or a comparison with Rust/Jai servers.
+Do not compare its throughput with published results on other machines or with
+more complete rendered pages.

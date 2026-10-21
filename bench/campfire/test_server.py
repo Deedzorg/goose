@@ -6,6 +6,7 @@ import base64
 import concurrent.futures
 import ctypes
 import ctypes.util
+from datetime import datetime, timedelta, timezone
 import gzip
 import hashlib
 import hmac
@@ -79,6 +80,7 @@ def main():
     parser.add_argument("executable", type=Path)
     parser.add_argument("--fixture-root", type=Path,
                         help="fixture parent directory (default: operating-system temporary storage)")
+    parser.add_argument("--no-cache", action="store_true", help="exercise the uncached baseline")
     args = parser.parse_args()
     executable = args.executable.resolve()
     with tempfile.TemporaryDirectory(prefix="campfire-integration-", dir=args.fixture_root) as directory:
@@ -90,13 +92,14 @@ def main():
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
-        env = dict(os.environ, DATABASE_PATH=str(database), SECRET_KEY_BASE=secret, PORT=str(port))
+        env = dict(os.environ, DATABASE_PATH=str(database), SECRET_KEY_BASE=secret, PORT=str(port),
+                   CAMPFIRE_CACHE="0" if args.no_cache else "1", CAMPFIRE_CACHE_DIAGNOSTICS="1")
         with (work / "server.log").open("w+") as log:
             server = subprocess.Popen([str(executable)], env=env, stdout=log, stderr=log,
                                       creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             try:
-                def request(path, credential=auth, method="GET", gzip_body=True, data=None, extra_headers=None):
-                    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+                def request(path, credential=auth, method="GET", gzip_body=True, data=None, extra_headers=None, connection=None):
+                    conn = connection or http.client.HTTPConnection("127.0.0.1", port, timeout=10)
                     headers = {"Accept-Encoding": "gzip" if gzip_body else "identity"}
                     if credential:
                         headers["Cookie"] = credential
@@ -110,7 +113,8 @@ def main():
                             body = gzip.decompress(body)
                         return response.status, body.decode(), dict(response.getheaders())
                     finally:
-                        conn.close()
+                        if connection is None:
+                            conn.close()
 
                 for _ in range(200):
                     if server.poll() is not None:
@@ -169,6 +173,48 @@ def main():
                 print("PASS: concurrent reads from 8 clients")
 
                 db = sqlite3.connect(database)
+                if not args.no_cache:
+                    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+                    try:
+                        route = "/rooms/1?cache-check=1"
+                        status, original, headers = request(route, connection=conn)
+                        assert status == 200 and headers["X-Campfire-Cache"] == "miss"
+                        status, body, headers = request(route, connection=conn)
+                        assert status == 200 and body == original and headers["X-Campfire-Cache"] == "hit"
+                        assert request(route, gzip_body=False, connection=conn)[1] == original
+                        assert request(route, method="HEAD", connection=conn)[1] == ""
+                        hidden = cookie(secret, "hidden-session")
+                        assert request(route, credential=hidden, connection=conn)[0] == 404
+                        assert request(route, credential=None, connection=conn)[0] == 302
+                        assert request(route, connection=conn)[2]["X-Campfire-Cache"] == "hit"
+
+                        expiry = datetime.now(timezone.utc) + timedelta(seconds=0.2)
+                        expiring = cookie(secret, "test-session", expiry=expiry.isoformat(timespec="milliseconds").replace("+00:00", "Z"))
+                        assert request(route, credential=expiring, connection=conn)[0] == 200
+                        assert request(route, credential=expiring, connection=conn)[0] == 200
+                        time.sleep(max(0, (expiry - datetime.now(timezone.utc)).total_seconds()) + 0.02)
+                        assert request(route, credential=expiring, connection=conn)[0] == 302
+
+                        db.execute("UPDATE rooms SET name='Renamed & room' WHERE id=1")
+                        db.execute("UPDATE message_search_index SET body='Updated message 100' WHERE rowid=100")
+                        db.commit()
+                        status, body, headers = request(route, connection=conn)
+                        assert status == 200 and headers["X-Campfire-Cache"] == "miss"
+                        assert "Renamed &amp; room" in body and "Updated message 100" in body
+                        for n in range(130):
+                            status, body, _ = request(f"/rooms/1?evict={n}", connection=conn)
+                            assert status == 200 and ids(body) == list(range(61, 101))
+                        assert request("/rooms/1?evict=0", connection=conn)[2]["X-Campfire-Cache"] == "miss"
+                        db.execute("DELETE FROM sessions WHERE token='test-session'")
+                        db.commit()
+                        assert request(route, connection=conn)[0] == 302
+                        db.execute("INSERT INTO sessions(user_id,token) VALUES (1,'test-session')")
+                        db.commit()
+                        assert request(route, connection=conn)[0] == 200
+                    finally:
+                        conn.close()
+                    print("PASS: real cache hits, user isolation, cookie expiry, external changes and entry eviction")
+
                 posted = "bench write a123beef"
                 encoded = urlencode({"message[body]": posted, "message[client_message_id]": "new-client"})
                 fields = {"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"}
@@ -209,13 +255,31 @@ def main():
                     assert saved == (1, value), saved
                 print("PASS: 32 concurrent acknowledged writes have distinct IDs and exact persisted bodies")
 
+                if not args.no_cache:
+                    db.executescript("CREATE TRIGGER revoke_author AFTER INSERT ON messages "
+                                     "BEGIN UPDATE users SET status=2 WHERE id=NEW.creator_id; END;")
+                    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+                    try:
+                        assert request("/rooms/1", connection=conn)[0] == 200
+                        assert request("/rooms/1/messages", method="POST", data=encoded,
+                                       extra_headers=fields, connection=conn)[0] == 200
+                        assert request("/rooms/1", connection=conn)[0] == 302
+                    finally:
+                        conn.close()
+                    db.executescript("DROP TRIGGER revoke_author; UPDATE users SET status=0 WHERE id=1;")
+                    print("PASS: writes invalidate authentication cached on the same connection")
+
+                for _ in range(8):
+                    assert request("/rooms/1")[0] == 200
                 db.execute("UPDATE users SET status=2 WHERE id=1")
                 db.commit()
-                assert request("/rooms/1")[0] == 302
+                for _ in range(8):
+                    assert request("/rooms/1")[0] == 302
                 db.execute("UPDATE users SET status=0 WHERE id=1")
                 db.execute("DELETE FROM memberships WHERE room_id=1 AND user_id=1")
                 db.commit()
-                assert request("/rooms/1")[0] == 404
+                for _ in range(8):
+                    assert request("/rooms/1")[0] == 404
                 db.close()
                 print("PASS: foreign database changes revoke sessions and room access")
             except BaseException:

@@ -10,10 +10,13 @@ import pages;
 import messages;
 import sessions;
 import assets;
+import cache;
 
 struct Settings {
     database: u8[..1024] = "campfire.sqlite3",
     cookie_key: u8[64] = [0; 64],
+    cache_enabled: bool = true,
+    cache_diagnostics: bool = false,
 }
 
 var settings = Settings { .. };
@@ -21,13 +24,17 @@ var settings = Settings { .. };
 extern fn campfire_now(out: u8[>..]&);
 extern fn campfire_sql_now(out: u8[>..]&);
 
-fn authenticate(db: sqlite::Db, req: const http::Request&, key: const u8[:]) -> i64 {
+fn authenticate(db: sqlite::Db, req: const http::Request&, key: const u8[:], state: campfire::CacheState&) -> i64 {
     let raw, has_cookie = http::cookie_of(req, "session_token");
     guard has_cookie else { return 0; }
     var now: u8[>..] = [];
     campfire_now(now);
+    guard now.len == 24 else { return 0; }
+    if state.enabled && state.auth_user > 0 && raw == state.auth_cookie &&
+       (state.auth_expiry.len == 0 || compare(now, state.auth_expiry) < 0) { return state.auth_user; }
     var token: u8[>..] = [];
-    guard campfire::verify_cookie(raw, key, now, token) else { return 0; }
+    var valid_until: u8[>..] = [];
+    guard campfire::verify_cookie(raw, key, now, token, valid_until) else { return 0; }
     var q = sqlite::Stmt {};
     var user: i64 = 0;
     let failed = sqlite::run() {
@@ -36,10 +43,17 @@ fn authenticate(db: sqlite::Db, req: const http::Request&, key: const u8[:]) -> 
         if sqlite::step(q) { user = sqlite::column_i64(q, 0); }
     };
     sqlite::finalize(q);
+    // Both the session row and the signed-cookie expiry must still be valid.
+    if state.enabled && failed.len == 0 && user > 0 {
+        state.auth_cookie = raw;
+        state.auth_expiry = valid_until;
+        state.auth_user = user;
+    }
     return if failed.len == 0 { user } else { 0 };
 }
 
-fn handle(db: sqlite::Db, req: const http::Request&, body: const u8[:], out: http::Reply) {
+fn handle(db: sqlite::Db, entries: campfire::CachedPage[:], bytes: u8[:], state: campfire::CacheState&,
+          req: const http::Request&, body: const u8[:], out: http::Reply) {
     let path = http::path_of(req.target);
     if path == "/assets/campfire.css" && (req.method == "GET" || req.method == "HEAD") {
         http::respond(out, 200, "text/css", campfire::STYLE);
@@ -57,7 +71,7 @@ fn handle(db: sqlite::Db, req: const http::Request&, body: const u8[:], out: htt
         campfire::login(db, req, body, settings.cookie_key, out);
         return;
     }
-    let user = authenticate(db, req, settings.cookie_key);
+    let user = authenticate(db, req, settings.cookie_key, state);
     if user == 0 {
         http::start(out, 302);
         http::field(out, "Location", "/session/new");
@@ -88,6 +102,7 @@ fn handle(db: sqlite::Db, req: const http::Request&, body: const u8[:], out: htt
         http::respond(out, 405, "text/plain", "Method not allowed");
         return;
     }
+    if req.method != "POST" && campfire::cached_page(entries, bytes, state, user, req, out) { return; }
     var html: u8[>..] = [];
     var status: i32 = 200;
     var posted = false;
@@ -133,22 +148,64 @@ fn handle(db: sqlite::Db, req: const http::Request&, body: const u8[:], out: htt
     } else if status != 200 {
         http::respond(out, status, "text/plain", if status == 404 { "Not found" } else { "Bad request" });
     } else {
-        http::respond_compressed(out, req, 200,
-            if posted { "text/vnd.turbo-stream.html; charset=utf-8" } else { "text/html; charset=utf-8" }, html);
+        if posted {
+            http::respond_compressed(out, req, 200, "text/vnd.turbo-stream.html; charset=utf-8", html);
+        } else {
+            campfire::cache_page(entries, bytes, state, user, req, html, out);
+        }
+    }
+}
+
+fn request(db: sqlite::Db, version: sqlite::Stmt, entries: campfire::CachedPage[:], bytes: u8[:], state: campfire::CacheState&,
+           req: const http::Request&, body: const u8[:], out: http::Reply) {
+    if !state.enabled || (req.method != "GET" && req.method != "HEAD") {
+        campfire::clear_cache(state);
+        handle(db, entries, bytes, state, req, body, out);
+        campfire::clear_cache(state);
+        return;
+    }
+    let failed = sqlite::run() {
+        sqlite::exec(db, "BEGIN");
+        // data_version opens the read snapshot used by authentication and rendering.
+        sqlite::reset(version);
+        guard sqlite::step(version) else { sqlite::fail(1, "Missing data_version"); }
+        let current = sqlite::column_i64(version, 0);
+        sqlite::reset(version);
+        if current != state.version {
+            campfire::clear_cache(state);
+            state.version = current;
+        }
+        handle(db, entries, bytes, state, req, body, out);
+    };
+    let rollback = sqlite::run() { if sqlite::in_transaction(db) { sqlite::exec(db, "ROLLBACK"); } };
+    if rollback.len > 0 {
+        // A worker must not serve another request with an unreleased snapshot.
+        for e in rollback { write_stderr(str("database rollback failed: ", e.message, "\n")); }
+        exit(1);
+    }
+    if failed.len > 0 {
+        campfire::clear_cache(state);
+        http::respond(out, 500, "text/plain", "Database error");
     }
 }
 
 thread_fn worker(cfg: http::Config) {
     var db = sqlite::Db {};
+    var version = sqlite::Stmt {};
     let failed = sqlite::run() {
         db = sqlite::open(settings.database, sqlite::READ_WRITE);
         sqlite::busy_timeout(db, 1000);
+        version = sqlite::prepare(db, "PRAGMA data_version");
     };
     if failed.len > 0 {
         for e in failed { write_stderr(str("database open failed: ", e.message, "\n")); }
         exit(1);
     }
-    let e = http::serve(cfg) { req, body, out => handle(db, req, body, out); };
+    var entries: campfire::CachedPage[128] = [campfire::CachedPage { .. }; 128];
+    var bytes: u8[16 * 1024 * 1024] = [0; 16 * 1024 * 1024];
+    var state = campfire::CacheState { enabled: settings.cache_enabled, diagnostics: settings.cache_diagnostics, .. };
+    let e = http::serve(cfg) { req, body, out => request(db, version, entries, bytes, state, req, body, out); };
+    sqlite::finalize(version);
     sqlite::close(db);
     http::report(e);
 }
@@ -162,6 +219,10 @@ fn main() {
     var secret: u8[>..] = [];
     guard env("SECRET_KEY_BASE", secret) && secret.len >= 32 else { abort("set SECRET_KEY_BASE to the database's Rails signing secret"); }
     settings.cookie_key = campfire::signed_cookie_key(secret);
+    var cache_text: u8[>..] = [];
+    if env("CAMPFIRE_CACHE", cache_text) { settings.cache_enabled = cache_text != "0"; }
+    var diagnostics: u8[>..] = [];
+    if env("CAMPFIRE_CACHE_DIAGNOSTICS", diagnostics) { settings.cache_diagnostics = diagnostics == "1"; }
     var cfg = http::Config { address: "127.0.0.1", port: 3000, workers: 4, max_conns: 1024, .. };
     var port_text: u8[>..] = [];
     if env("PORT", port_text) {

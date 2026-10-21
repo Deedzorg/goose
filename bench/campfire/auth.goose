@@ -67,7 +67,7 @@ fn sign_cookie(token: const u8[:], key: const u8[:], expiry: const u8[:]) -> u8[
 }
 
 // Rails serializes a signed cookie's value inside a purpose/expiry envelope.
-fn verify_cookie(raw: const u8[:], key: const u8[:], now: const u8[:], token: u8[>..]&) -> bool {
+fn verify_cookie(raw: const u8[:], key: const u8[:], now: const u8[:], token: u8[>..]&, valid_until: u8[>..]&) -> bool {
     guard raw.len < 8192 else { return false; }
     var decoded_cookie: u8[>..] = [];
     guard http::decode(raw, decoded_cookie, false) else { return false; }
@@ -98,6 +98,7 @@ fn verify_cookie(raw: const u8[:], key: const u8[:], now: const u8[:], token: u8
             Null => {},
             Str s => {
                 guard s.s.len == 24 && s.s[23] == 'Z' && now.len == 24 && compare(s.s, now) > 0 else { return false; }
+                valid_until.append(s.s);
             },
             _ => { return false; },
         }
