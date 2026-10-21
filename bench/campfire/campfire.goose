@@ -207,7 +207,8 @@ thread_fn worker(cfg: http::Config) {
     var version = sqlite::Stmt {};
     let failed = sqlite::run() {
         db = sqlite::open(settings.database, sqlite::READ_WRITE);
-        sqlite::busy_timeout(db, 1000);
+        sqlite::busy_timeout(db, 5000);
+        sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA journal_size_limit=67108864; PRAGMA cache_size=2000;");
         version = sqlite::prepare(db, "PRAGMA data_version");
     };
     if failed.len > 0 {

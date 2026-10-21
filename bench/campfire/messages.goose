@@ -7,6 +7,8 @@ import pages;
 import html;
 
 extern fn campfire_disconnected_before(out: u8[>..]&);
+extern fn campfire_writer_enter();
+extern fn campfire_writer_leave();
 
 fn same_origin(req: const http::Request&) -> bool {
     let site, has_site = http::field_of(req, "Sec-Fetch-Site");
@@ -38,6 +40,7 @@ fn post_message(db: sqlite::Db, req: const http::Request&, body: const u8[:], us
     var status: i32 = 404;
     var disconnected_before: u8[>..] = [];
     campfire_disconnected_before(disconnected_before);
+    campfire_writer_enter();
     let failed = sqlite::run() {
         sqlite::exec(db, "BEGIN IMMEDIATE");
         let transaction_errors = sqlite::transaction(db) {
@@ -101,6 +104,7 @@ fn post_message(db: sqlite::Db, req: const http::Request&, body: const u8[:], us
     if failed.len > 0 {
         let rollback_errors = sqlite::run() { if sqlite::in_transaction(db) { sqlite::exec(db, "ROLLBACK"); } };
     }
+    campfire_writer_leave();
     for e in failed { sqlite::fail(e.code, e.message); }
     return status;
 }

@@ -3,11 +3,46 @@
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <crypt.h>
+#include <pthread.h>
 #endif
 
 typedef struct { const uint8_t *data; int64_t len; } campfire_bytes;
+
+#ifdef _WIN32
+static SRWLOCK writer_mutex = SRWLOCK_INIT;
+static CONDITION_VARIABLE writer_ready = CONDITION_VARIABLE_INIT;
+#define writer_lock() AcquireSRWLockExclusive(&writer_mutex)
+#define writer_unlock() ReleaseSRWLockExclusive(&writer_mutex)
+#define writer_wait() SleepConditionVariableSRW(&writer_ready, &writer_mutex, INFINITE, 0)
+#define writer_wake() WakeAllConditionVariable(&writer_ready)
+#else
+static pthread_mutex_t writer_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t writer_ready = PTHREAD_COND_INITIALIZER;
+#define writer_lock() pthread_mutex_lock(&writer_mutex)
+#define writer_unlock() pthread_mutex_unlock(&writer_mutex)
+#define writer_wait() pthread_cond_wait(&writer_ready, &writer_mutex)
+#define writer_wake() pthread_cond_broadcast(&writer_ready)
+#endif
+static uint64_t writer_next, writer_serving;
+
+// FIFO admission avoids SQLite busy-handler retry races between server workers.
+void campfire_writer_enter(void) {
+    writer_lock();
+    uint64_t ticket = writer_next++;
+    while (ticket != writer_serving) writer_wait();
+    writer_unlock();
+}
+
+void campfire_writer_leave(void) {
+    writer_lock();
+    ++writer_serving;
+    writer_wake();
+    writer_unlock();
+}
 
 static void campfire_timestamp(gs_rref out, int sql, int future, int seconds_ago) {
     struct timespec instant;

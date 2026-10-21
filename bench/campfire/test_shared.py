@@ -231,6 +231,8 @@ def main():
                     assert before == after
                     db.execute("DROP TRIGGER campfire_test_failure")
                     db.commit()
+                    resumed, _, _ = post(33)
+                    assert db.execute("SELECT count(*) FROM messages WHERE id=?", (resumed,)).fetchone()[0] == 1
                     for _ in range(8):
                         assert request(f"/rooms/{room}")[0] == 200
                     db.execute("DELETE FROM memberships WHERE user_id=? AND room_id=?", (user, room))

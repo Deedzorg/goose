@@ -66,6 +66,19 @@ Writes update messages, Action Text, FTS, the room timestamp and membership
 unread state in a transaction before acknowledging success. A small browser UI
 polls for new messages.
 
+Message writers enter a process-local FIFO gate before acquiring SQLite's write
+lock. This prevents one worker's continuous transactions from starving other
+workers through SQLite's busy-handler retry schedule. External writers still
+use SQLite's locking and five-second timeout. The gate is released after commit
+or rollback. Connections use WAL, synchronous NORMAL, a 64 MiB journal size
+limit and a 2,000-page SQLite cache, matching the reference defaults. NORMAL
+preserves committed writes across process crashes but a power failure can lose
+writes since the last WAL sync. The pinned
+[Rust database](https://github.com/basecamp/once-campfire-rust/blob/6dae2fd3c1a2dce61ca11beb731bcce2b42b67ad/crates/db/src/database.rs)
+and [Jai connection](https://github.com/lucasmeijer/once-campfire-jai/blob/e56ba63/src/framework/db/connection.jai)
+document these durability settings. Goose retains SQLite's automatic checkpoint;
+the other servers use a background checkpointer.
+
 Messages use the reference message/presentation element structure and render
 stored Action Text through a conservative HTML allowlist. Unknown tags and
 attributes are removed, links are restricted, text is escaped and retained tags
@@ -96,7 +109,7 @@ The independent Python integration test creates a synthetic database, generates
 cookies independently and checks decoded output, denied access, concurrent reads,
 32 concurrent acknowledged writes, exact persisted bodies, rollback after an
 injected SQL failure, and access revocation after another connection edits the
-database. It passes on Windows and Linux; bcrypt login is exercised on Linux.
+database. Current validation runs on Linux, including bcrypt login.
 The same checks run with caching disabled. Cache-specific checks verify actual
 hits, identity/gzip equality, cross-user isolation, cookie expiry, revocation,
 external content changes, local SQL-trigger changes and entry eviction. A
@@ -182,7 +195,8 @@ this loopback prototype; PostgreSQL would change the reference application's
 SQLite storage model.
 
 Application routing, signing, queries and rendering are Goose. `platform.c` is a
-small UTC-clock/libcrypt bcrypt adapter; SQLite, HTTP OS interfaces and hashing
+small UTC-clock/libcrypt bcrypt and native writer-synchronization adapter;
+SQLite, HTTP OS interfaces and hashing
 also use the external packages' native components.
 
 ## Reference-analysis regression checks

@@ -63,7 +63,13 @@ def metrics(container):
         values = dict(line.split() for line in cpu.stdout.splitlines())
         if "usage_usec" in values:
             result["cpu_seconds"] = int(values["usage_usec"]) / 1e6
+    if "cpu_seconds" not in result:
+        cpu = command("docker", "exec", container, "cat", "/sys/fs/cgroup/cpuacct/cpuacct.usage", check=False)
+        if cpu.returncode == 0:
+            result["cpu_seconds"] = int(cpu.stdout.strip()) / 1e9
     memory = command("docker", "exec", container, "cat", "/sys/fs/cgroup/memory.stat", check=False)
+    if memory.returncode != 0:
+        memory = command("docker", "exec", container, "cat", "/sys/fs/cgroup/memory/memory.stat", check=False)
     if memory.returncode == 0:
         values = dict(line.split() for line in memory.stdout.splitlines())
         for field in ("anon", "total_rss", "rss"):
