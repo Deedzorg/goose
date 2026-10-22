@@ -17,6 +17,7 @@ struct CacheState {
     version: i64 = -1,
     enabled: bool = true,
     diagnostics: bool = false,
+    byte_limit: i64 = 16 * 1024 * 1024,
     count: i64 = 0,
     used: i64 = 0,
     auth_user: i64 = 0,
@@ -38,16 +39,18 @@ fn find_page(entries: const CachedPage[:], bytes: const u8[:], state: const Cach
     return -1;
 }
 
-// Offsets remain valid until the worker resets the entire cache generation.
-fn store_page(entries: CachedPage[:], bytes: u8[:], state: CacheState&, user: i64,
+// Storage grows to its high-water mark within byte_limit and is reused across
+// generations. Entries contain offsets, so growth cannot invalidate their locations.
+fn store_page(entries: CachedPage[:], bytes: u8[>..]&, state: CacheState&, user: i64,
               target: const u8[:], plain: const u8[:], packed: const u8[:]) {
     let size = target.len + plain.len + packed.len;
-    if entries.len == 0 || size > 1024 * 1024 || size > bytes.len || target.len > 2048 { return; }
-    if state.count >= entries.len || state.used + size > bytes.len { clear_cache(state); }
+    if entries.len == 0 || size > 1024 * 1024 || size > state.byte_limit || target.len > 2048 { return; }
+    if state.count >= entries.len || state.used + size > state.byte_limit { clear_cache(state); }
     let start = state.used;
     let plain_start = start + target.len;
     let gzip_start = plain_start + plain.len;
     let end = gzip_start + packed.len;
+    for i in max(0, end - bytes.len) { bytes.push(0); }
     copy_into(bytes[start..plain_start], target);
     copy_into(bytes[plain_start..gzip_start], plain);
     copy_into(bytes[gzip_start..end], packed);
@@ -93,7 +96,7 @@ fn cached_page(entries: const CachedPage[:], bytes: const u8[:], state: const Ca
     return true;
 }
 
-fn cache_page(entries: CachedPage[:], bytes: u8[:], state: CacheState&,
+fn cache_page(entries: CachedPage[:], bytes: u8[>..]&, state: CacheState&,
               user: i64, req: const http::Request&, body: const u8[:], out: http::Reply) {
     if !state.enabled {
         http::respond_compressed(out, req, 200, "text/html; charset=utf-8", body);

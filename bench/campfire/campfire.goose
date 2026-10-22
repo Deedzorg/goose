@@ -64,7 +64,7 @@ fn authenticate(db: sqlite::Db, req: const http::Request&, key: const u8[:], sta
     return if failed.len == 0 { user } else { 0 };
 }
 
-fn handle(db: sqlite::Db, writer: const campfire::WriterStatements&, entries: campfire::CachedPage[:], bytes: u8[:], state: campfire::CacheState&,
+fn handle(db: sqlite::Db, writer: const campfire::WriterStatements&, entries: campfire::CachedPage[:], bytes: u8[>..]&, state: campfire::CacheState&,
           req: const http::Request&, body: const u8[:], out: http::Reply) {
     let path = http::path_of(req.target);
     if starts_with(path,"/assets/") && (req.method=="GET" || req.method=="HEAD") {
@@ -186,7 +186,7 @@ fn handle(db: sqlite::Db, writer: const campfire::WriterStatements&, entries: ca
     }
 }
 
-fn request(db: sqlite::Db, writer: const campfire::WriterStatements&, version: sqlite::Stmt, entries: campfire::CachedPage[:], bytes: u8[:], state: campfire::CacheState&,
+fn request(db: sqlite::Db, writer: const campfire::WriterStatements&, version: sqlite::Stmt, entries: campfire::CachedPage[:], bytes: u8[>..]&, state: campfire::CacheState&,
            req: const http::Request&, body: const u8[:], out: http::Reply) {
     if !state.enabled || (req.method != "GET" && req.method != "HEAD") {
         campfire::clear_cache(state);
@@ -236,7 +236,7 @@ thread_fn worker(cfg: http::Config) {
         exit(1);
     }
     var entries: campfire::CachedPage[128] = [campfire::CachedPage { .. }; 128];
-    var bytes: u8[16 * 1024 * 1024] = [0; 16 * 1024 * 1024];
+    var bytes: u8[>..] = [];
     var state = campfire::CacheState { enabled: settings.cache_enabled, diagnostics: settings.cache_diagnostics, .. };
     let e = http::serve(cfg) { req, body, out => request(db, writer, version, entries, bytes, state, req, body, out); };
     campfire::close_writer(writer);

@@ -101,9 +101,13 @@ invisible memberships retain their state.
 
 Each worker caches up to 128 pages and 16 MiB of URL/plain/gzip data, with a 1 MiB
 limit per entry. Keys contain the authenticated user ID and complete request
-target, Host, User-Agent, Turbo-Frame and Cookie headers. Buffers are passed directly; entries contain offsets into a fixed byte
-array. Invalidation resets counters, so no live array needs to shrink. A full
-cache starts a new generation rather than individually evicting pages.
+target, Host, User-Agent, Turbo-Frame and Cookie headers. Buffers are passed
+directly; entries contain offsets into a grow-only byte array. Storage starts
+empty and grows only to the largest occupied prefix, up to the same 16 MiB limit
+per worker. Invalidation resets counters and reuses that storage without
+shrinking it. A full cache starts a new generation rather than individually
+evicting pages. Unused capacity consumes no resident pages; storage already
+touched remains available to that worker until it exits.
 
 Each cached read opens a SQLite read transaction, checks `PRAGMA data_version`,
 then authenticates and reads the page within that snapshot. A change made by any
@@ -253,17 +257,21 @@ cleared and the unrelated pool retains all four bytes:
 
 The reduced examples preserve the original issue and now test its resolution.
 The full HTTP callback also produced conservative alias errors with a by-value
-holder and with direct parameters to grow-only arrays. The bounded cache uses
-fixed buffers and scalar offsets, so it does not depend on improving those cases.
+holder and with direct parameters to arrays that could shrink. The original
+bounded cache used fixed buffers and scalar offsets. The current cache keeps
+offsets but grows storage with push operations and never shrinks the underlying
+array, including at generation changes. This compiles with the same d9573d81
+compiler; a general resize call is unsuitable because it admits shrinking.
 
 ## Reference-analysis approaches
 
 1. **Adapt the cache API to current Goose.** Pass array references directly, or
    pass a small holder of references by value, with mutable scalar metadata
    handled separately. Both reduced forms are verified. This is the smallest
-   route back to the server experiment. The full callback needed fixed buffers
-   and logical lengths as well; the reduced controls alone did not establish
-   that the complete cache could shrink its arrays.
+   route back to the server experiment. The initial full callback used fixed
+   buffers and logical lengths; it now uses a grow-only buffer with those same
+   logical lengths. The reduced controls do not establish that the complete
+   cache could shrink its arrays.
 2. **Improve Goose's reference analysis.** Preserve per-field referents through
    aggregate reference parameters and calls. Keep rejecting real aliases to
    reusable pools, including rebinding and aliases introduced in loops. The
@@ -351,6 +359,45 @@ Receipts are `write-profile-before-2`, `write-profile-after` and
 to aggregate context/wait/SQL/render/commit/cleanup durations every 1,024 writes
 per worker. These measurements include instrumentation and do not isolate each
 change within a stage. The completed three-way comparison below disables profiling.
+
+## Demand-grown cache storage, 2026-10-22
+
+The per-worker cache is now a grow-only array with logical offsets, retaining
+its original 128-entry, 16 MiB and 1 MiB-per-entry limits. No page content,
+compression policy, authentication, invalidation rule, SQLite setting or worker
+count was changed. Cache-off requests leave this buffer empty.
+
+The previous fixed-array initializer produced both a 16 MiB value and a 16 MiB
+initialization temporary on each worker's data stacks. Those touched pages
+remained resident after initialization. Four workers therefore touched roughly
+128 MiB just for these arrays, with additional page-granularity overhead.
+Appending cache storage on demand removes that initialization and keeps only
+storage actually used. The application uses existing Goose features; no compiler
+or package change is involved.
+
+`profile_memory.py` compares process mappings and cgroup memory after login,
+after 64 room requests, and after 64 passes over all four read routes. On the
+shared fixture it measured anonymous process memory as follows:
+
+| Phase | Previous cache, MiB | Demand-grown cache, MiB |
+| --- | ---: | ---: |
+| After login | 138.28 | 2.33 |
+| After room reads | 149.92 | 15.70 |
+| After all read routes | 150.74 | 18.84 |
+
+These are retained-memory probes, not throughput measurements. Receipts are
+`bench/campfire/build/memory-before/memory.json` and
+`bench/campfire/build/memory-lazy/memory.json`, with executable hashes and mapping
+breakdowns. A cache that fills its full capacity can still retain 64 MiB across
+four workers; this change preserves capacity instead of choosing a smaller
+fixture-specific cache.
+
+Cache unit checks cover growth, retained contents, identity separation,
+byte/entry eviction, oversized-entry rejection and reuse after invalidation.
+Synthetic and shared fixture integrations pass with caching on and off.
+`parity-memory-rust` and `parity-memory-jai` under `bench/campfire/build` each
+contain 27 passing differential rendering checks and all 315 static-asset checks,
+with caching enabled for Rust and disabled for Jai.
 
 ## Build and test
 
@@ -443,7 +490,7 @@ can follow the worktree pointer. Published defaults are Rust `main` (resolved to
 image before starting) and Jai `e56ba63`, the image linked by its README;
 unpublished Jai changes are outside this comparison.
 
-### Results with rendering parity, 2026-10-22
+### Historical results before demand-grown storage, 2026-10-22
 
 The completed receipt is `bench/campfire/build/shared-render-parity-1/summary.json`,
 from clean revision `8d3da3fb2d9fcc22ec31625da40d83c318cf3670`, executable SHA-256

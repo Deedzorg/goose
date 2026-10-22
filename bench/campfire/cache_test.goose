@@ -5,12 +5,16 @@ import cache;
 
 fn main() {
     var entries: campfire::CachedPage[2] = [campfire::CachedPage { .. }; 2];
-    var bytes: u8[48] = [0; 48];
-    var state = campfire::CacheState { .. };
+    var bytes: u8[>..] = [];
+    var state = campfire::CacheState { byte_limit: 48, .. };
+    assert(bytes.len == 0);
     campfire::store_page(entries, bytes, state, 1, "/a", "first", "zip1");
+    assert(bytes.len == 11);
     campfire::store_page(entries, bytes, state, 2, "/a", "second", "zip2");
     assert(campfire::find_page(entries, bytes, state, 1, "/a") == 0);
     assert(campfire::find_page(entries, bytes, state, 2, "/a") == 1);
+    assert(bytes[entries[0].plain_start..entries[0].gzip_start] == "first");
+    assert(bytes[entries[1].plain_start..entries[1].gzip_start] == "second");
     assert(campfire::find_page(entries, bytes, state, 3, "/a") == -1);
     assert(campfire::find_page(entries, bytes, state, 1, "/a?b") == -1);
     campfire::store_page(entries, bytes, state, 1, "/b", "replacement", "zip3");
@@ -25,7 +29,11 @@ fn main() {
     campfire::store_page(entries, bytes, state, 1, "/huge", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", "");
     assert(state.count == 1 && state.used == 37);
     campfire::clear_cache(state);
-    assert(state.count == 0 && state.used == 0);
+    assert(state.count == 0 && state.used == 0 && bytes.len == 37);
+    campfire::store_page(entries, bytes, state, 4, "/reuse", "ok", "");
+    assert(bytes.len == 37 && state.used == 8);
+    assert(bytes[entries[0].plain_start..entries[0].gzip_start] == "ok");
+    campfire::clear_cache(state);
     assert(campfire::find_page(entries, bytes, state, 1, "/c") == -1);
     print("Cache key isolation, content, capacity eviction and reset passed");
 }
