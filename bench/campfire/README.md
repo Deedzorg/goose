@@ -395,9 +395,10 @@ fixture-specific cache.
 Cache unit checks cover growth, retained contents, identity separation,
 byte/entry eviction, oversized-entry rejection and reuse after invalidation.
 Synthetic and shared fixture integrations pass with caching on and off.
-`parity-memory-rust` and `parity-memory-jai` under `bench/campfire/build` each
+`parity-memory-final-rust` and `parity-memory-final-jai` under `bench/campfire/build` each
 contain 27 passing differential rendering checks and all 315 static-asset checks,
-with caching enabled for Rust and disabled for Jai.
+with caching enabled for Rust and disabled for Jai. These final checks use the
+exact executable measured in the comparison below.
 
 ## Build and test
 
@@ -489,6 +490,78 @@ directory mounted at its WSL path, as above, so revision and cleanliness checks
 can follow the worktree pointer. Published defaults are Rust `main` (resolved to an immutable
 image before starting) and Jai `e56ba63`, the image linked by its README;
 unpublished Jai changes are outside this comparison.
+
+### Current results with demand-grown storage, 2026-10-22
+
+The completed receipt is `bench/campfire/build/shared-memory-1/summary.json`,
+from clean revision `3e338d9a2af9b854feefd93e4261072c3821e71e`, executable SHA-256
+`55e74fd60b4c2ccac87a899b5dbe4eeadd99a4c9ca7096972a1a437721f72485`.
+The log is `build/campfire/shared-memory-1.log`. The compiler remains `d9573d81`.
+The pinned Rust/Jai images, shared seed, verifier, SQLite settings and all
+benchmark parameters are unchanged from the preceding comparison: the same
+Ryzen 9 9950X3D / WSL2 machine, native WSL database storage, server CPUs 0/2/4/6,
+generator CPUs 8/10/12/14, 2 GiB per server, gzip, 16 clients, three rotating
+rounds, two-second warmups and eight-second samples. Profiling was disabled;
+this task ran no other builds or tests during measurement.
+
+All **54 timed samples** passed. Including warmups and preflights, the generator
+validated **33,231,662 responses**, with **zero transport errors or invalid
+responses**. The shared SQL audit verified **535,259 acknowledged writes**:
+257,528 Goose, 118,953 Rust and 158,778 Jai. All 18 disposable databases passed
+row-count, FTS, Action Text and SQLite integrity checks. The original seed and
+executable hashes were unchanged. Every timed mixed sample acknowledged 79
+posts at the configured ten-posts/s rate.
+
+Median anonymous resident memory, sampled after each workload:
+
+| Workload | Goose before, MiB | Goose now, MiB | Rust, MiB | Jai, MiB |
+| --- | ---: | ---: | ---: | ---: |
+| Room reads | 150.5 | 21.5 | 22.4 | 45.3 |
+| Writes | 154.2 | 26.9 | 92.5 | 110.1 |
+| Mixed reads/writes | 152.6 | 24.1 | 73.8 | 87.8 |
+
+Goose's retained memory fell **85.7% for room reads**, **82.6% for writes** and
+**84.2% for mixed traffic** relative to the preceding run. These are cgroup
+anonymous-resident samples, not peak memory, virtual address space or a bound
+on total memory under other traffic. Cache storage can still reach the original
+64 MiB aggregate limit when the workload needs that capacity.
+
+Median valid requests per second:
+
+| Workload | Goose before | Goose now | Rust | Jai |
+| --- | ---: | ---: | ---: | ---: |
+| Room | 166,343 | 160,028 | 28,226 | 70,739 |
+| Older messages | 170,286 | 167,380 | 27,621 | 72,060 |
+| Sidebar | 179,281 | 152,524 | 30,125 | 74,414 |
+| Search | 171,635 | 160,711 | 30,128 | 74,010 |
+| POST message | 8,599 | 8,505 | 4,150 | 5,352 |
+| Room with ten posts/s in another room | 163,171 | 150,252 | 27,152 | 68,429 |
+
+Goose retains its advantage on every measured workload. Room-read ratios are
+**5.67x Rust / 2.26x Jai**; write ratios are **2.05x / 1.59x**; mixed-room ratios
+are **5.53x / 2.20x**. The before column comes from the earlier complete run,
+not an interleaved old/new experiment. Room throughput was 3.8% lower, writes
+1.1% lower, older messages 1.7% lower, search 6.4% lower, mixed traffic 7.9%
+lower and sidebar 14.9% lower. These differences combine any implementation
+effect with run-to-run variation; this is not a claim of zero throughput cost.
+Goose room rounds were 136,224 / 165,395 / 160,028 requests/s, and write rounds
+were 8,308 / 8,505 / 8,534. The fresh reference measurements above are the basis
+for the current cross-language ratios.
+
+Median per-run latency and server CPU:
+
+| Metric | Goose | Rust | Jai |
+| --- | ---: | ---: | ---: |
+| Room p99, ms | 0.253 | 1.191 | 0.500 |
+| POST p99, ms | 6.471 | 8.919 | 7.575 |
+| Mixed room p99, ms | 0.266 | 1.433 | 0.562 |
+| Server CPU cores used, room | 2.08 | 3.31 | 2.76 |
+| Server CPU cores used, POST | 1.74 | 2.92 | 2.34 |
+
+The rendering parity and application-scope limits described above still apply.
+The exact measured executable passes 27 differential responses and all 315
+static assets against each reference. No rendering or validation shortcut was
+introduced. All changes remain in the experimental worktree and branch.
 
 ### Historical results before demand-grown storage, 2026-10-22
 
