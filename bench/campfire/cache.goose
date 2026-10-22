@@ -77,9 +77,16 @@ fn send_page(out: http::Reply, req: const http::Request&, plain: const u8[:], gz
     }
 }
 
+fn page_cache_key(req: const http::Request&) -> u8[>..] {
+    var out: u8[>..]=[]; out.append(req.target);
+    for name in ["Host","User-Agent","Turbo-Frame","Cookie"] {
+        let value,present=http::field_of(req,name); format(out,"\n",name,":",value.len,":",value);
+    } return out;
+}
+
 fn cached_page(entries: const CachedPage[:], bytes: const u8[:], state: const CacheState&, user: i64, req: const http::Request&, out: http::Reply) -> bool {
     if !state.enabled { return false; }
-    let index = find_page(entries, bytes, state, user, req.target);
+    let index = find_page(entries, bytes, state, user, page_cache_key(req));
     if index < 0 { return false; }
     let entry = entries[index];
     send_page(out, req, bytes[entry.plain_start..entry.gzip_start], bytes[entry.gzip_start..entry.end], state.diagnostics, true);
@@ -99,5 +106,5 @@ fn cache_page(entries: CachedPage[:], bytes: u8[:], state: CacheState&,
         compress::finish(encoder, packed);
     }
     send_page(out, req, body, packed, state.diagnostics, false);
-    store_page(entries, bytes, state, user, req.target, body, packed);
+    store_page(entries, bytes, state, user, page_cache_key(req), body, packed);
 }

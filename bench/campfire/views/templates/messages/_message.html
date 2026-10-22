@@ -1,0 +1,33 @@
+{#- reference/app/views/messages/_message.html.erb, with MessagesHelper#message_tag #}
+{%- if message.is_unrenderable() %}
+  {% include "messages/_unrenderable.html" %}
+{%- else %}
+  <div id="{{ message.dom_id("") }}" class="message {% if message.all_emoji %}message--emoji{% endif %}" data-controller="reply" data-user-id="{{ message.creator.id }}" data-message-id="{{ message.id }}" data-message-timestamp="{{ message.created_at_epoch() }}" data-message-updated-at="{{ message.updated_at_epoch() }}" data-sort-value="{{ message.created_at_epoch() }}" data-messages-target="message" data-search-results-target="message" data-refresh-room-target="message" data-reply-composer-outlet="#composer">
+    <h2 class="message__day-separator"><time datetime="{{ message.created_at_iso() }}" data-local-time-target="date"></time></h2>
+
+    <figure class="avatar message__avatar">
+      <a title="{{ message.creator.title }}" class="btn avatar" data-turbo-frame="_top" href="{{ message.creator.path() }}"><img aria-hidden="true" src="{{ message.creator.avatar_url }}" width="48" height="48" /></a>
+    </figure>
+
+    <turbo-frame id="{{ message.dom_id("edit") }}">
+      <div class="message__body">
+        <div class="message__body-content">
+          <div class="message__meta">
+            <h3 class="message__heading">
+              <span class="message__author" title="{{ message.creator.title }}">
+                <strong data-reply-target="author">{{ message.creator.name }}</strong>
+              </span>
+              <a target="_top" class="message__permalink" href="{{ message.at_path() }}"><time class="message__timestamp" datetime="{{ message.created_at_iso() }}" data-local-time-target="time"></time></a>
+              <span class="message__room">
+                <a target="_top" data-reply-target="link" href="{{ message.at_path() }}">{{ message.room_name }}</a>
+              </span>
+            </h3>
+            {% include "messages/_actions.html" %}
+          </div>
+          {% include "messages/_presentation.html" %}
+          {% include "messages/boosts/_boosts.html" %}
+        </div>
+      </div>
+    </turbo-frame>
+</div>
+{%- endif %}

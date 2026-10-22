@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare a pinned SQLite package with Campfire's full-text-search support."""
+"""Prepare pinned SQLite with FTS5 and the WAL frame-count observer."""
 
 from pathlib import Path
 import subprocess
@@ -26,7 +26,16 @@ def main():
         raise SystemExit("sqlite.build has other edits; refusing to overwrite them")
     if current != expected:
         sidecar.write_bytes(expected)
-    print(f"SQLite package {revision}, FTS5 enabled")
+    shim = SQLITE / "shim/sqlite.c"
+    original_shim = subprocess.check_output([*GIT, "-C", str(SQLITE), "show", "HEAD:shim/sqlite.c"])
+    extension = (HERE / "sqlite_wal.c").read_bytes().replace(b"\r\n", b"\n")
+    expected_shim = original_shim + b"\n" + extension
+    current_shim = shim.read_bytes().replace(b"\r\n", b"\n")
+    if current_shim not in (original_shim, expected_shim):
+        raise SystemExit("SQLite shim has other edits; refusing to overwrite them")
+    if current_shim != expected_shim:
+        shim.write_bytes(expected_shim)
+    print(f"SQLite package {revision}, FTS5 and WAL observer enabled")
 
 
 if __name__ == "__main__":

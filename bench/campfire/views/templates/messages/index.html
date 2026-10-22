@@ -1,0 +1,4 @@
+{#- reference/app/views/messages/index.html.erb -#}
+{%- for message in messages %}
+{{ crate::messages::cached_message_item(ctx, message) }}
+{%- endfor %}

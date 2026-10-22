@@ -1,0 +1,62 @@
+{#- reference/app/views/layouts/application.html.erb. Pages extend this, have a `ctx` field, and
+    implement `crate::layouts::Page` for @page_title / @body_class. content_for regions are the
+    head, nav, footer and sidebar blocks; the page itself is the content block. -#}
+<!DOCTYPE html>
+<html>
+  <head>
+    {{ h::page_title_tag(self.page_title().as_deref()) }}
+
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=resizes-content">
+    <meta name="view-transition" content="same-origin">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    {{ h::current_user_meta_tags(ctx) }}
+    {{ h::script_aware_action_cable_meta_tag(ctx) }}
+
+    {{ h::builder_tag("meta", h::attrs().name("vapid-public-key").attr_opt("content", ctx.vapid_public_key.as_deref())) }}
+    {{ h::builder_tag("meta", h::attrs().name("turbo-prefetch").attr("content", "true")) }}
+
+    {{ h::builder_tag("link", h::attrs().attr("rel", "manifest").attr("href", "/webmanifest.json")) }}
+    {{ h::builder_tag("link", h::attrs().attr("rel", "icon").attr("href", ctx.account.logo_url.as_str()).type_("image/png")) }}
+    {{ h::builder_tag("link", h::attrs().attr("rel", "apple-touch-icon").attr("href", ctx.account.logo_url.as_str())) }}
+
+    {{ h::raw(ctx.stylesheet_tags) }}
+    {{ h::custom_styles_tag(ctx) }}
+
+    {{ h::raw(ctx.importmap_tags) }}
+
+{% block head %}{% endblock %}  </head>
+
+  <body class="{{ h::body_classes(ctx, self.body_class()) }}" data-controller="local-time lightbox">
+    <a href="#main-content" class="skip-navigation btn">Skip to main content</a>
+
+    <nav id="nav">
+{% block nav %}{% endblock %}    </nav>
+
+{% let notice = ctx.flash_notice.as_ref().or(ctx.flash_alert.as_ref()) %}{% if let Some(notice) = notice %}      <div class="flash" data-controller="element-removal" data-action="animationend->element-removal#remove">
+        <div class="flash__inner shadow" style="{% if ctx.flash_alert.is_some() %}--flash-background: var(--color-negative){% endif %}">
+{% if ctx.flash_alert.is_some() %}            {{ h::image_tag(ctx, "alert.svg", h::attrs().aria("hidden", true).size(24).class("colorize--white")) }}</span>
+{% else %}            {{ h::image_tag(ctx, "check.svg", h::attrs().aria("hidden", true).size(24).class("colorize--white")) }}</span>
+{% endif %}        </div>
+        <span class="for-screen-reader" role="alert" aria-atomic="true">{{ notice }}</span>
+      </div>
+{% endif %}
+    <main id="main-content">
+{% block content %}{% endblock %}
+      <footer id="footer">
+{% block footer %}{% endblock %}      </footer>
+    </main>
+
+    <aside id="sidebar" data-controller="toggle-class" data-toggle-class-toggle-class="open">
+{% block sidebar %}{% endblock %}    </aside>
+
+    {% include "layouts/_lightbox.html" %}
+
+    <a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page">
+      {{ h::image_tag(ctx, "campfire-icon.png", h::attrs().alt("Campfire logo").attr("width", 256).attr("height", 216)) }}
+    </a>
+  </body>
+</html>
+

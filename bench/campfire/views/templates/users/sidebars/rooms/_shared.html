@@ -1,0 +1,3 @@
+{% filter link_to_room(room.id, h::attrs().id(h::dom_id(room.param_key.as_str(), room.id, Some("list"))).data("sorted_list_name", room.name.as_str()).style("--column-gap: 0.5em").class(room.class_names())) %}
+  <span class="overflow-ellipsis">{{ room.name }}</span>
+{% endfilter %}

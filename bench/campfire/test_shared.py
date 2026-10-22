@@ -201,7 +201,7 @@ def main():
                                             "FROM messages m JOIN message_search_index idx ON idx.rowid=m.id "
                                             "JOIN action_text_rich_texts rt ON rt.record_id=m.id "
                                             "AND rt.record_type='Message' AND rt.name='body' WHERE m.id=?", (mid,)).fetchall()
-                        assert stored == [(write_room, user, client_id, text, "<div>" + html.escape(text, quote=True) + "</div>")], stored
+                        assert stored == [(write_room, user, client_id, text, html.escape(text, quote=True))], stored
                     assert db.execute("SELECT updated_at FROM rooms WHERE id=?", (write_room,)).fetchone()[0] != initial_touch
                     assert set(message_ids(request(f"/searches?q={run}")[2])) == {mid for mid, _, _ in acknowledged}
                     print("PASS: 32 concurrent acknowledgements have distinct IDs and exact message, Action Text and FTS rows; room touched", flush=True)

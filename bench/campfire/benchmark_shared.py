@@ -96,6 +96,7 @@ def main():
     parser.add_argument("--profiles", default="baseline,mixed")
     parser.add_argument("--routes", default="room_show,messages_page,sidebar,search,post_message")
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--profile-writes", action="store_true", help="record Goose write-stage timings; adds instrumentation overhead")
     args = parser.parse_args()
     if platform.system() != "Linux":
         raise SystemExit("Run inside the Linux toolchain container")
@@ -138,7 +139,7 @@ def main():
         "images": images, "server_cpus": server_cpus, "client_cpus": client_cpus, "memory_limit_bytes": 2 * 1024**3,
         "platform": platform.platform(), "cpu_model": next(line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines() if line.startswith("model name")),
         "duration_seconds": args.duration, "clients": args.clients, "rounds": args.rounds,
-        "profiles": profiles, "read_routes": selected, "mixed_write_rate": 10, "gzip": True, "preflight_only": args.preflight_only,
+        "profile_writes": args.profile_writes, "profiles": profiles, "read_routes": selected, "mixed_write_rate": 10, "gzip": True, "preflight_only": args.preflight_only,
         "validator_sha256": checksum(verification / "loadgen/src/validation.rs"),
         "contracts_sha256": checksum(verification / "bench/contracts.rb"),
         "write_audit_sha256": checksum(verification / "bench/validate_acks.rb"),
@@ -178,7 +179,7 @@ def main():
                                   RAILS_LOG_LEVEL="warn", HTTP_PORT=str(port), TARGET_PORT=str(port + 1),
                                   PORT=str(port), DATABASE_PATH="/rails/storage/db/production.sqlite3",
                                   STORAGE_PATH="/rails/storage/files", CAMPFIRE_CACHE="1", CAMPFIRE_CACHE_DIAGNOSTICS="0",
-                                  CAMPFIRE_RESPONSE_CACHE_MB="64")
+                                  CAMPFIRE_RESPONSE_CACHE_MB="64", CAMPFIRE_PROFILE_WRITES="1" if args.profile_writes else "0")
                     env_file = data / "server.env"
                     env_file.write_text("".join(f"{key}={value}\n" for key, value in config.items()))
                     os.chmod(env_file, 0o600)
@@ -297,6 +298,9 @@ def main():
                         (output / f"{label}-server.log").write_text(log.stdout + log.stderr)
                         raise
                     finally:
+                        if args.profile_writes:
+                            log = command("docker", "logs", name, check=False)
+                            (output / f"{label}-server.log").write_text(log.stdout + log.stderr)
                         command("docker", "rm", "-f", name, check=False)
     assert checksum(seed / "db/production.sqlite3") == metadata["seed_sha256"], "source seed changed"
     assert checksum(executable) == metadata["executable_sha256"], "executable changed during measurement"

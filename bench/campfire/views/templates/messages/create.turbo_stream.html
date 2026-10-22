@@ -1,0 +1,2 @@
+{#- reference/app/views/messages/create.turbo_stream.erb -#}
+<turbo-stream action="append" target="{{ crate::messages::room_dom_id(*room_kind, message.room_id(), "messages") }}"><template>{{ crate::messages::cached_message_item(ctx, message) }}</template></turbo-stream>

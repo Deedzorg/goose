@@ -1,0 +1,51 @@
+<details class="notifications-help hide-in-browser" data-notifications-target="details">
+  <summary class="btn">
+    {{ h::image_tag(ctx, "external/gear.svg", h::attrs().aria_hidden().size(20)) }}
+    <strong>Check your {{ ctx.platform.operating_system }} settings</strong>
+    {{ h::image_tag(ctx, "disclosure.svg", h::attrs().aria_hidden().size(10).class("disclosure")) }}
+  </summary>
+
+{% if ctx.platform.firefox && ctx.platform.android %}      <ol>
+        <li>Tap the <em>{{ h::image_tag(ctx, "menu-dots-vertical.svg", h::attrs().alt("More options").size(16)) }}</em> menu button.</li>
+        <li>Tap <em>Settings</em>.</li>
+        <li>Tap <em>Notifications</em>.</li>
+        <li>Tap <em>{{ h::image_tag(ctx, "external/switch.svg", h::attrs().alt("the toggle button").size(22)) }}</em> to <em>Allow {{ h::capitalize(ctx.platform.browser.as_str()) }} notifications</em>.</li>
+      </ol>
+{% elif ctx.platform.edge && ctx.platform.desktop %}      <ol>
+        <li>Click <em>Start</em>, then <em>Settings</em>.</li>
+        <li>Go to <em>System &gt; Notification</em>.</li>
+        <li>Click <em>{{ h::image_tag(ctx, "external/switch.svg", h::attrs().alt("the toggle button").size(22)) }}</em> <em>ON</em> for Campfire.</li>
+      </ol>
+{% elif (ctx.platform.firefox || ctx.platform.chrome) && ctx.platform.desktop %}      <ol>
+{% if ctx.platform.windows %}          <li>Click <em>Start</em>, then <em>Settings</em>.</li>
+          <li>Go to <em>System &gt; Notification</em>.</li>
+          <li>Click <em>{{ h::image_tag(ctx, "external/switch.svg", h::attrs().alt("the toggle button").size(22)) }}</em> <em>ON</em> for Campfire.</li>
+{% else %}          <li>Click <em aria-label="the Apple menu"></em> in the top left.</li>
+          <li>Click <em>System Settings…</em>.</li>
+          <li>Click <em>Notifications</em>.</li>
+          <li>Click <em>Campfire</em>.</li>
+          <li>Click <em>{{ h::image_tag(ctx, "external/switch.svg", h::attrs().alt("the allow notifications switch").size(22)) }}</em> to <em>Allow notifications</em>.</li>
+{% endif %}      </ol>
+{% elif ctx.platform.safari && ctx.platform.desktop %}      <ol>
+        <li>Click <em aria-label="the Apple menu"></em> in the top left.</li>
+        <li>Click <em>System Settings…</em>.</li>
+        <li>Click <em>Notifications</em>.</li>
+        <li>Click <em>Campfire</em>.</li>
+        <li>Click <em>{{ h::image_tag(ctx, "external/switch.svg", h::attrs().alt("the allow notifications switch").size(22)) }}</em> to <em>Allow notifications</em>.</li>
+      </ol>
+{% elif (ctx.platform.safari || ctx.platform.chrome) && ctx.platform.ios %}      <ol>
+        <li>Open the <em>{{ h::image_tag(ctx, "external/gear.svg", h::attrs().aria_hidden().size(20)) }}</em> Settings app.</li>
+        <li>Scroll to and tap <em>Campfire</em>.</li>
+        <li>Tap <em>Notifications</em>.</li>
+        <li>Tap <em>{{ h::image_tag(ctx, "external/switch.svg", h::attrs().alt("the allow notifications switch button").size(22)) }}</em> to <em>Allow Notifications</em>.</li>
+      </ol>
+{% elif ctx.platform.chrome && ctx.platform.android %}      <ol>
+        <li>Open the <em>{{ h::image_tag(ctx, "external/gear.svg", h::attrs().aria_hidden().size(20)) }}</em> Settings app.</li>
+        <li>Tap <em>Notifications</em>.</li>
+        <li>Tap <em>App notifications</em>.</li>
+        <li>Scroll to <em>Campfire</em>.</li>
+        <li>Tap <em>{{ h::image_tag(ctx, "external/switch.svg", h::attrs().alt("the switch").size(22)) }}</em> to <em>Allow Notifications</em>.</li>
+      </ol>
+{% else %}      <p>Ensure notifications are allowed for {{ h::capitalize(ctx.platform.browser.as_str()) }} in your system settings.</p>
+{% endif %}</details>
+

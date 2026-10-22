@@ -4,7 +4,9 @@ This is a partial Campfire implementation on `codex/campfire-experiment`.
 The experiment is rebased onto `master` at `d9573d81`, which fixes the
 HTTP-package compiler regression. Goose, Rust and the published Jai image now
 pass all eight shared HTTP preflight contracts, including decoded avatars and
-audited message writes. This does not establish full application parity.
+audited message writes. The current renderer also matches the pinned Rust and
+published Jai responses in 27 differential cases each. This establishes parity
+for the tested rendered responses, not the complete application.
 The files are contained under `bench/campfire` so the experiment can be moved to
 its own repository later. It is not on `master`.
 
@@ -61,26 +63,33 @@ measurements, not measurements from this prototype.
 The server listens on loopback with four workers and a SQLite connection per
 worker. It implements signed Rails-style session cookies, active-user checks,
 Linux bcrypt login, room membership checks, the latest 40 messages and older
-windows, FTS search, a visible-shared-room sidebar, gzip responses and plain-text posting.
+windows, FTS search, shared and direct-room sidebars, gzip responses and plain-text posting.
 Writes update messages, Action Text, FTS, the room timestamp and membership
-unread state in a transaction before acknowledging success. A small browser UI
-polls for new messages.
+unread state in a transaction before acknowledging success. Native Goose view
+functions render the full pinned reference templates, including layout, editor,
+message actions, reactions, user details and media markup.
 
 Message writers enter a process-local FIFO gate before acquiring SQLite's write
-lock. This prevents one worker's continuous transactions from starving other
+lock, waking only the next queued writer. This prevents one worker's continuous transactions from starving other
 workers through SQLite's busy-handler retry schedule. External writers still
 use SQLite's locking and five-second timeout. The gate is released after commit
-or rollback. Connections use WAL, synchronous NORMAL, a 64 MiB journal size
+or rollback, before rendering the acknowledgement. Each worker reuses eight
+prepared write statements and resets all of them on both success and failure.
+Connections use WAL, synchronous NORMAL, a 64 MiB journal size
 limit and a 2,000-page SQLite cache, matching the reference defaults. NORMAL
 preserves committed writes across process crashes but a power failure can lose
 writes since the last WAL sync. The pinned
 [Rust database](https://github.com/basecamp/once-campfire-rust/blob/6dae2fd3c1a2dce61ca11beb731bcce2b42b67ad/crates/db/src/database.rs)
 and [Jai connection](https://github.com/lucasmeijer/once-campfire-jai/blob/e56ba63/src/framework/db/connection.jai)
-document these durability settings. Goose retains SQLite's automatic checkpoint;
-the other servers use a background checkpointer.
+document these durability settings. A dedicated Goose thread performs PASSIVE
+checkpoints after each additional 1,000 WAL pages; at 10,000 pages the writer
+requests a RESTART checkpoint, matching the pinned Rust thresholds. A bounded
+queue coalesces notifications, and a mutex prevents overlapping checkpoints.
+Busy checkpoints can delay WAL reclamation. No durability setting was weakened.
 
-Messages use the reference message/presentation element structure and render
-stored Action Text through a conservative HTML allowlist. Unknown tags and
+Messages render stored Action Text, attachment metadata, signed Active Storage
+URLs, mentions, OpenGraph cards, sound messages and Unicode emoji presentation.
+Rich HTML passes through a conservative allowlist. Unknown tags and
 attributes are removed, links are restricted, text is escaped and retained tags
 are balanced. Signed avatar IDs enforce purpose and expiry; stored square WebP
 variants are served with content type, length, ETag and HEAD support. Users
@@ -90,7 +99,7 @@ invisible memberships retain their state.
 
 Each worker caches up to 128 pages and 16 MiB of URL/plain/gzip data, with a 1 MiB
 limit per entry. Keys contain the authenticated user ID and complete request
-target. Buffers are passed directly; entries contain offsets into a fixed byte
+target, Host, User-Agent, Turbo-Frame and Cookie headers. Buffers are passed directly; entries contain offsets into a fixed byte
 array. Invalidation resets counters, so no live array needs to shrink. A full
 cache starts a new generation rather than individually evicting pages.
 
@@ -122,15 +131,18 @@ The server returns an error for those unacknowledged writes. Storage latency and
 write contention depend on the filesystem. The shared comparison uses native
 WSL temporary storage for all implementations.
 
-This is not a full Rails replacement. Rich formatting supports a subset of HTML;
-attachments, mentions, media unfurls, Action Cable/WebSocket delivery, account
-administration, uploads, notifications and the wider UI are not implemented.
+This is not a full Rails replacement. Rich formatting supports a subset of HTML.
+Attachment markup is rendered, but the blob/representation download routes and
+on-demand transformations are not implemented. Action Cable/WebSocket delivery,
+message editing/deletion/reactions, account administration, uploads, notifications
+and other UI actions remain unimplemented; matching their rendered controls
+does not implement those actions.
 POST accepts plain text, not the complete rich-text editor protocol. Image
 avatars require an existing preprocessed WebP variant and return 501 if it is
 missing; on-demand image transformation is not implemented. Bot fallback SVGs
 are simpler than Rails'. There is no TLS configuration or deployment setup.
-Windows password login returns 501; signed sessions still work. Browser/UI
-parity has not been established. Shared HTTP validation supports a scoped
+Windows password login returns 501; signed sessions still work. Full browser/UI
+behavior parity has not been established. Shared HTTP validation supports a scoped
 workload comparison, not a claim that these applications do equivalent work
 outside those contracts or that a measured difference comes from the language.
 
@@ -188,14 +200,18 @@ the complete preflight receipt is `bench/campfire/build/shared-preflight-3/`.
 - [goose-sqlite](https://github.com/kaitk/goose-sqlite)
   `739fa6af40ecaa48a59d032114e01975c53edd85`: SQLite bindings/amalgamation.
 
-`prepare.py` creates a private SQLite package checkout under `build/` and enables
-`SQLITE_ENABLE_FTS5` in its build sidecar. It refuses to overwrite other sidecar
-edits. All other packages are fetched by Goose. TLS and REST are not required for
+`prepare.py` creates a private SQLite package checkout under `build/`, enables
+`SQLITE_ENABLE_FTS5` and appends `sqlite_wal.c` to the package shim. That adapter
+installs SQLite's WAL hook using the package's validated connection handle and
+records the committed frame count; checkpoint policy remains Goose code. The
+preparer refuses to overwrite other sidecar or shim edits. All other packages
+are fetched by Goose. TLS and REST are not required for
 this loopback prototype; PostgreSQL would change the reference application's
 SQLite storage model.
 
 Application routing, signing, queries and rendering are Goose. `platform.c` is a
-small UTC-clock/libcrypt bcrypt and native writer-synchronization adapter;
+UTC-clock/libcrypt bcrypt, native writer/checkpoint synchronization and optional
+write-timing adapter;
 SQLite, HTTP OS interfaces and hashing
 also use the external packages' native components.
 
@@ -284,12 +300,54 @@ Changing to `reusable[]` would primarily affect cache misses, memory use and
 eviction-heavy traffic. It would not itself remove work from the repeated-hit
 path measured below.
 
-The shared HTTP contracts now pass. Profiling should guide further performance
-work: per-hit SQLite work, shared handle-table locking, response copying and
-cache behavior under writes are candidates, not demonstrated bottlenecks. A
-faster replay path must still enforce database-generation changes, cookie
-expiry and permissions. Remaining UI and attachment work is separate from the
-validated HTTP workload.
+The shared HTTP contracts now pass. A faster cached path must still enforce
+database-generation changes, cookie expiry and permissions. Remaining browser
+actions and attachment serving are separate from the validated HTTP workload.
+
+## Rendering parity and write profiles, 2026-10-22
+
+`views/templates/` contains 26 unmodified MIT-licensed templates from Rust
+`6dae2fd3c1a2dce61ca11beb731bcce2b42b67ad`. `views/source.json` records their
+hashes. `compile_views.py` verifies those hashes and compiles the supported
+Askama subset into eight native Goose functions; unsupported expressions fail
+the build. Database presenters, helpers, rich HTML and attachment rendering are
+implemented in Goose. No rendered response is replayed from a reference capture.
+
+The frontend manifest records 315 immutable assets from the pinned image.
+`prepare_assets.py` provisions them into ignored build storage and verifies every
+hash. `compile_assets.py` generates asset lookup functions and static layout tags.
+The server serves only paths in this manifest.
+
+`test_rendering.py` compares parsed HTML structure, attributes and text, preserving
+whitespace in preformatted/script/style content. It normalizes attribute order,
+ordinary whitespace, the server's base URL and POST-generated timestamps. The
+27 cases cover cold/warm room, pagination, search and sidebar responses, direct
+and empty rooms, rich content, attachments, missing authors, mentions, sounds,
+Host and Chrome variants, foreign database edits without timestamp changes,
+and plain-text/emoji/Japanese POST markup. It also verifies the content hash and
+MIME type of all 315 assets served by Goose.
+
+The optimized binary passed all 27 comparisons against each reference, with
+Goose caching disabled for Rust and enabled for Jai. Receipts are
+`bench/campfire/build/parity-wal-rust/result.json` and
+`bench/campfire/build/parity-wal-jai/result.json`. Synthetic and shared fixture
+tests also passed with caching enabled and disabled, including concurrent writes,
+rollback and subsequent writes, revocation and unread membership semantics.
+
+Two audited 10-second POST rounds at each stage gave these instrumented medians:
+
+| Write implementation | Requests/s | Mean SQL, microseconds | Mean commit, microseconds |
+| --- | ---: | ---: | ---: |
+| Full rendering, original writer | 2,865 | 174.81 | 73.12 |
+| Reused statements, render after commit, smaller context | 3,691 | 107.46 | 67.16 |
+| Background WAL checkpoints and wake-one FIFO | 8,241 | 59.50 | 21.89 |
+
+Receipts are `write-profile-before-2`, `write-profile-after` and
+`write-profile-wal` under `bench/campfire/build`. Set
+`CAMPFIRE_PROFILE_WRITES=1`, or pass `--profile-writes` to the shared benchmark,
+to aggregate context/wait/SQL/render/commit/cleanup durations every 1,024 writes
+per worker. These measurements include instrumentation and do not isolate each
+change within a stage. The final three-way comparison must disable profiling.
 
 ## Build and test
 
@@ -297,10 +355,18 @@ From the repository root on Linux with Docker:
 
 ```sh
 docker build -t goose-campfire-toolchain -f bench/campfire/Dockerfile.toolchain bench/campfire
+mkdir -p /tmp/goose-campfire-comparison
+docker run --rm --network host \
+  -v "$PWD:$PWD" -v /tmp/goose-campfire-comparison:/tmp/goose-campfire-comparison \
+  -v /usr/bin/docker:/usr/local/bin/docker:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock --workdir "$PWD" \
+  goose-campfire-toolchain python3 bench/campfire/prepare_assets.py \
+  --seed build/campfire/reference/shared-seed --runtime-root /tmp/goose-campfire-comparison
 docker run --rm -v "$PWD:/workspace" goose-campfire-toolchain sh bench/campfire/build_linux.sh
 ```
 
-The script prepares SQLite, builds the compiler, checks the HTTP-package
+Asset provisioning requires the shared seed and pinned Rust image described
+above. The script prepares SQLite and generates the native views/assets, builds the compiler, checks the HTTP-package
 reproducer, builds the server, then runs the integration, HMAC, rich-text
 sanitizer and reduced cache-API checks. Build outputs and downloaded packages are ignored. Windows
 users can run these commands in WSL from the
@@ -310,6 +376,8 @@ Native Windows build (Python 3, Git, CMake and a supported C/C++ compiler on PAT
 
 ```powershell
 python bench/campfire/prepare.py
+python bench/campfire/compile_views.py
+python bench/campfire/compile_assets.py
 cmake -S . -B build/campfire/compiler -DGOOSE_BUILTIN_LIBS=none
 cmake --build build/campfire/compiler --config Release --parallel 4
 $env:GOOSE_HOME = Join-Path $PWD 'build/campfire/home'
@@ -369,7 +437,7 @@ for every run. Published defaults are Rust `main` (resolved to an immutable
 image before starting) and Jai `e56ba63`, the image linked by its README;
 unpublished Jai changes are outside this comparison.
 
-### Measured results, 2026-10-21
+### Historical results before rendering parity, 2026-10-21
 
 The completed receipt is `bench/campfire/build/shared-comparison-2/summary.json`.
 It records a clean Goose revision `f8d28251bf1a47e63287afbf2764505d9bf49855`,
@@ -446,11 +514,9 @@ an injected transaction failure. Local logs are `build/campfire/writer-final-tes
 and `build/campfire/shared-comparison-2.log` at the repository root. Raw data and
 audit bodies stay ignored.
 
-The next useful work is completing the missing rendering/UI behavior for a
-stronger parity claim, and profiling the serialized write path. Prepared
-statement reuse, rendering after the database critical section and background
-WAL checkpoints are concrete candidates; these measurements do not isolate
-their individual costs. No new compiler blocker was encountered.
+The rendering and write work described above supersedes this implementation.
+These historical throughput figures involve unequal rendered work and must not
+be used as the current performance comparison. No new compiler blocker was encountered.
 
 ## Historical cache comparison
 

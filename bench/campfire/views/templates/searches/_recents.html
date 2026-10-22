@@ -1,0 +1,13 @@
+{#- The recent-searches links repeated in searches/index.html.erb's nav and sidebar -#}
+    {%- for search in index.recent_searches %}
+      <a class="align-center gap room btn txt-nowrap" href="{{ crate::searches::search_path(search) }}">
+        <span class="overflow-ellipsis">“{{ search }}”</span>
+</a>
+    {%- endfor %}
+
+    {%- if !index.recent_searches.is_empty() %}
+      <form class="button_to" method="post" action="{{ ctx.url(h::routes::clear_searches().as_str()) }}"><input type="hidden" name="_method" value="delete" /><button class="btn searches__btn" data-turbo-confirm="Are you sure you want to clear your recent searches?" type="submit">
+        <img aria-hidden="true" src="{{ ctx.asset("broom.svg") }}" />
+        <span class="for-screen-reader">Clear recent searches</span>
+</button></form>
+    {%- endif %}

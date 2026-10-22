@@ -8,15 +8,22 @@ import http.compression;
 import auth;
 import pages;
 import messages;
+import checkpoints;
 import sessions;
 import assets;
 import cache;
 import avatars;
 import signed_id;
+import view_data;
+import view_types;
+import view_assets_generated;
 
 struct Settings {
     database: u8[..1024] = "campfire.sqlite3",
     cookie_key: u8[64] = [0; 64],
+    storage_key: u8[64] = [0;64],
+    stream_key: u8[64] = [0;64],
+    vapid: u8[..256] = [],
     avatar_key: u8[64] = [0; 64],
     storage: u8[..1024] = "storage",
     cache_enabled: bool = true,
@@ -27,6 +34,7 @@ var settings = Settings { .. };
 
 extern fn campfire_now(out: u8[>..]&);
 extern fn campfire_sql_now(out: u8[>..]&);
+extern fn campfire_profile_enable(enabled: bool);
 
 fn authenticate(db: sqlite::Db, req: const http::Request&, key: const u8[:], state: campfire::CacheState&) -> i64 {
     let raw, has_cookie = http::cookie_of(req, "session_token");
@@ -56,12 +64,16 @@ fn authenticate(db: sqlite::Db, req: const http::Request&, key: const u8[:], sta
     return if failed.len == 0 { user } else { 0 };
 }
 
-fn handle(db: sqlite::Db, entries: campfire::CachedPage[:], bytes: u8[:], state: campfire::CacheState&,
+fn handle(db: sqlite::Db, writer: const campfire::WriterStatements&, entries: campfire::CachedPage[:], bytes: u8[:], state: campfire::CacheState&,
           req: const http::Request&, body: const u8[:], out: http::Reply) {
     let path = http::path_of(req.target);
-    if path == "/assets/campfire.css" && (req.method == "GET" || req.method == "HEAD") {
-        http::respond(out, 200, "text/css", campfire::STYLE);
-        return;
+    if starts_with(path,"/assets/") && (req.method=="GET" || req.method=="HEAD") {
+        let index=campfire::asset_public_index(path); var data: u8[>..]=[];
+        if index>=0 && read_file(str("bench/campfire/build/reference-assets/",campfire::asset_filename(index)),data) {
+            http::start(out,200); http::field(out,"Cache-Control","public, max-age=31536000, immutable");
+            http::field(out,"Content-Type",campfire::asset_mime(index));
+            http::finish(out,http::NO_TYPE,data);
+        } else { http::respond(out,404,"text/plain","Asset not found"); } return;
     }
     if path == "/up" {
         http::respond(out, 200, "text/html", "<!DOCTYPE html><html><body style=\"background-color: green\"></body></html>");
@@ -119,14 +131,19 @@ fn handle(db: sqlite::Db, entries: campfire::CachedPage[:], bytes: u8[:], state:
     var html: u8[>..] = [];
     var status: i32 = 200;
     var posted = false;
+    var view_bytes: u8[>..]=[];
     let failed = sqlite::run() {
+        let context_start=campfire::campfire_profile_clock();
+        var ctx=campfire::ViewContext { .. };
+        if req.method=="POST" { ctx.user=campfire::load_user(db,user,settings.avatar_key,view_bytes); }
+        else { ctx=campfire::load_view_context(db,user,settings.avatar_key,settings.stream_key,settings.vapid,req,view_bytes,settings.storage_key); }
         if path == "/users/me/sidebar" {
-            campfire::sidebar(db, user, html);
+            campfire::sidebar(db, user, settings.avatar_key, ctx, view_bytes, html);
         } else if path == "/searches" {
             var search: u8[>..] = [];
             let raw, has_query = http::query_of(req.target, "q");
             if has_query && http::decode(raw, search, true) {
-                campfire::search(db, user, search, settings.avatar_key, html);
+                campfire::search(db, user, search, settings.avatar_key, ctx, view_bytes, req, html);
             } else {
                 status = 400;
             }
@@ -140,13 +157,13 @@ fn handle(db: sqlite::Db, entries: campfire::CachedPage[:], bytes: u8[:], state:
                 if req.method == "POST" && messages {
                     var now: u8[>..] = [];
                     campfire_sql_now(now);
-                    status = campfire::post_message(db, req, body, user, room, now, settings.avatar_key, html);
+                    status = campfire::post_message(db, writer, req, body, user, room, now, settings.avatar_key, ctx, view_bytes, context_start, html);
                     posted = true;
                 } else if req.method == "POST" {
                     status = 405;
                 } else {
                     let before, has_before = http::query_int(req.target, "before");
-                    status = campfire::room(db, user, room, if has_before { before } else { 0 }, messages, settings.avatar_key, html);
+                    status = campfire::room(db, user, room, if has_before { before } else { 0 }, messages, settings.avatar_key, ctx, view_bytes, settings.stream_key, html);
                 }
             } else {
                 status = 404;
@@ -169,11 +186,11 @@ fn handle(db: sqlite::Db, entries: campfire::CachedPage[:], bytes: u8[:], state:
     }
 }
 
-fn request(db: sqlite::Db, version: sqlite::Stmt, entries: campfire::CachedPage[:], bytes: u8[:], state: campfire::CacheState&,
+fn request(db: sqlite::Db, writer: const campfire::WriterStatements&, version: sqlite::Stmt, entries: campfire::CachedPage[:], bytes: u8[:], state: campfire::CacheState&,
            req: const http::Request&, body: const u8[:], out: http::Reply) {
     if !state.enabled || (req.method != "GET" && req.method != "HEAD") {
         campfire::clear_cache(state);
-        handle(db, entries, bytes, state, req, body, out);
+        handle(db, writer, entries, bytes, state, req, body, out);
         campfire::clear_cache(state);
         return;
     }
@@ -188,7 +205,7 @@ fn request(db: sqlite::Db, version: sqlite::Stmt, entries: campfire::CachedPage[
             campfire::clear_cache(state);
             state.version = current;
         }
-        handle(db, entries, bytes, state, req, body, out);
+        handle(db, writer, entries, bytes, state, req, body, out);
     };
     let rollback = sqlite::run() { if sqlite::in_transaction(db) { sqlite::exec(db, "ROLLBACK"); } };
     if rollback.len > 0 {
@@ -205,11 +222,14 @@ fn request(db: sqlite::Db, version: sqlite::Stmt, entries: campfire::CachedPage[
 thread_fn worker(cfg: http::Config) {
     var db = sqlite::Db {};
     var version = sqlite::Stmt {};
+    var writer=campfire::WriterStatements { .. };
     let failed = sqlite::run() {
         db = sqlite::open(settings.database, sqlite::READ_WRITE);
         sqlite::busy_timeout(db, 5000);
         sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA journal_size_limit=67108864; PRAGMA cache_size=2000;");
         version = sqlite::prepare(db, "PRAGMA data_version");
+        campfire::prepare_writer(db,writer);
+        let wal=campfire::campfire_track_wal(db.id); if wal!=0 { sqlite::fail(wal,"Cannot install WAL observer"); }
     };
     if failed.len > 0 {
         for e in failed { write_stderr(str("database open failed: ", e.message, "\n")); }
@@ -218,7 +238,8 @@ thread_fn worker(cfg: http::Config) {
     var entries: campfire::CachedPage[128] = [campfire::CachedPage { .. }; 128];
     var bytes: u8[16 * 1024 * 1024] = [0; 16 * 1024 * 1024];
     var state = campfire::CacheState { enabled: settings.cache_enabled, diagnostics: settings.cache_diagnostics, .. };
-    let e = http::serve(cfg) { req, body, out => request(db, version, entries, bytes, state, req, body, out); };
+    let e = http::serve(cfg) { req, body, out => request(db, writer, version, entries, bytes, state, req, body, out); };
+    campfire::close_writer(writer);
     sqlite::finalize(version);
     sqlite::close(db);
     http::report(e);
@@ -234,6 +255,9 @@ fn main() {
     guard env("SECRET_KEY_BASE", secret) && secret.len >= 32 else { abort("set SECRET_KEY_BASE to the database's Rails signing secret"); }
     settings.cookie_key = campfire::signed_cookie_key(secret);
     settings.avatar_key = campfire::signed_id_key(secret);
+    hash::pbkdf2_sha256(settings.storage_key, secret, "ActiveStorage", 1000);
+    hash::pbkdf2_sha256(settings.stream_key, secret, "turbo/signed_stream_verifier_key", 1000);
+    var vapid: u8[>..]=[]; if env("VAPID_PUBLIC_KEY",vapid) { settings.vapid=vapid; }
     var storage: u8[>..] = [];
     if env("STORAGE_PATH", storage) {
         guard storage.len > 0 && storage.len <= 1024 else { abort("STORAGE_PATH is too long or empty"); }
@@ -243,6 +267,8 @@ fn main() {
     if env("CAMPFIRE_CACHE", cache_text) { settings.cache_enabled = cache_text != "0"; }
     var diagnostics: u8[>..] = [];
     if env("CAMPFIRE_CACHE_DIAGNOSTICS", diagnostics) { settings.cache_diagnostics = diagnostics == "1"; }
+    var profiling: u8[>..]=[];
+    campfire_profile_enable(env("CAMPFIRE_PROFILE_WRITES",profiling) && profiling=="1");
     var cfg = http::Config { address: "127.0.0.1", port: 3000, workers: 4, max_conns: 1024, .. };
     var port_text: u8[>..] = [];
     if env("PORT", port_text) {
@@ -250,5 +276,9 @@ fn main() {
         guard ok && port > 0 && port < 65536 else { abort("invalid PORT"); }
         cfg.port = port as i32;
     }
+    qlimit<campfire::CheckpointJob>(1);
+    let checkpointer=thread_spawn(campfire::checkpointer,copy(settings.database));
     http::run(cfg, worker);
+    while !qput(campfire::CheckpointJob { stop:true }) { sleep_ms(1); }
+    thread_wait(checkpointer);
 }

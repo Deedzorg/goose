@@ -1,0 +1,18 @@
+{#- reference/app/views/rooms/show/_invitation.html.erb, shown when the caller decided it applies -#}
+  <div id="system_welcome" class="message message--formatted txt-align-center center">
+    <div class="message__body center">
+      <div class="message__body-content position-relative">
+        {{ h::account_logo_tag(ctx, Some("center margin-block-end txt-large")) }}
+        <div class="flex align-center gap">
+          <div class="system-welcome--translation">
+            {{ h::translation_button(ctx, "invite_message") }}
+          </div>
+          <p>
+            <strong>Welcome to Campfire</strong><br>
+            To invite people to chat, share the join link below.
+          </p>
+        </div>
+        {% include "accounts/_invite.html" %}
+      </div>
+    </div>
+  </div>

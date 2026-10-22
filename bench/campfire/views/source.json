@@ -1,0 +1,32 @@
+{
+  "repository": "https://github.com/basecamp/once-campfire-rust",
+  "revision": "6dae2fd3c1a2dce61ca11beb731bcce2b42b67ad",
+  "templates_sha256": {
+    "users/sidebars/rooms/_direct.html": "db0a581261ffac1ac2a071546ed3fe460d8e71652eb3cc987d80334e97e9bccc",
+    "messages/boosts/_boost.html": "69671188ad74382384fcbbcc6af7d8363f3f460c3b9768ca09a508e403b5338a",
+    "messages/_message.html": "dce189dd996be7eed8d3553795d3ec4c4646e9b64d8d6c87b17b2f08bfc1d810",
+    "messages/boosts/_boosts.html": "3494202a5ffe1233aab26212659edcd8804423f1538a83d847299e7e17d070ad",
+    "messages/_presentation.html": "50862e9988ded527b4d530a24be905f9098c4d0ac4dfd41f69a75b20214843c7",
+    "messages/_actions.html": "ee94e6c1936ab63d83b4e8b5a765862b771520640f728921576179c12aa90abb",
+    "messages/_unrenderable.html": "342a8b3593582218953cd7286d26f1daa8a8a3bf8745f5c06c0cd7f1f37e080a",
+    "messages/create.turbo_stream.html": "0ba0a5b54071820e259409ba31a7d84c44513fddc13671d088cbf70b29bb98e5",
+    "messages/index.html": "81eae75220a3b44e1603882f7dc504990344fd0601d94ea3570072b3d755dd7a",
+    "searches/index.html": "a269a223c76306d89c4ba7a3a20a3aeed893b6a70cef0879c76d7e39c2e601ca",
+    "searches/_recents.html": "823c7c81f150375aa3dc7c6475f999f81df96db898e8d64be6018dc8b765b4d9",
+    "layouts/application.html": "8ea5f868494b1d3aa3481906e8da098ed79d35f186a1d0241fb634741c073b90",
+    "layouts/_lightbox.html": "e2c68b6ff8d6f0d6bdbaccf04022481a25d4d584b99304978eea12bbc3e3d5c3",
+    "users/sidebars/show.html": "02b1072a79341ffd7acbbbf9a26c4a7dded2797649f39e1ea95a5cffc61e4fbc",
+    "users/sidebars/rooms/_shared.html": "3dfddcbdc4622204016fe86ba06092e4765dcae55e952703878d85424750f661",
+    "users/sidebars/rooms/_direct_placeholder.html": "7fd5c41d619f53cbbb61ea3f4f7ea036fe8fa20b8ed93e701a6f243ed6787287",
+    "rooms/show.html": "aaf4f27df6e270c2beb57c9267a8f85da868c90343661e40bb63f524558c6a0e",
+    "rooms/show/_composer.html": "04e80a4ac6fcf57a6130cfd3a44f6356f2cf54353e728d06ca6628c89710976b",
+    "rooms/show/_invitation.html": "9d820a353a4ae570f3a0755c705fdba2cba7e98d74d204ec31267ef61e74a197",
+    "accounts/_invite.html": "91565ea3a09d83ef7b2976a819f09ec21005f149f4cd5d9f2fd63a8354caca7d",
+    "messages/_template.html": "50ddc7d48d7d406fbad3f3561b95c230be2ccb342ce22098cef8926e927ea3fb",
+    "rooms/show/_nav.html": "637c49941a2e2b8ef732df48ef56967411006598a30b083a8be8e513949c50ca",
+    "rooms/involvements/_bell.html": "f31f1d492220c2223955aa4bd33d1d8d0e905c27ef5ca290a4a90590d64dabce",
+    "pwa/_install_instructions.html": "5a4834643300a3c5cdee55923595c978658936ed0dbc49fe2180cc80eb3208b9",
+    "pwa/_system_settings.html": "b9342b49d9bce040d48eed281d4453bce1cda2c26009fe398741d49c78388653",
+    "pwa/_browser_settings.html": "cc524bfd2da85d02e9da8efe315e1b2a1a5059ebdce3b5d8545320d322d3749d"
+  }
+}

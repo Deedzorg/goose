@@ -1,0 +1,4 @@
+{#- reference/app/views/messages/_presentation.html.erb -#}
+<div id="{{ message.dom_id("presentation") }}" dir="auto" data-reply-target="body" data-messages-target="body">
+  {{ crate::messages::presentation::message_presentation(ctx, message)|safe }}
+</div>

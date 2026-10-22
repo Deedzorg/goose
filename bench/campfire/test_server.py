@@ -11,6 +11,7 @@ import gzip
 import hashlib
 import hmac
 import http.client
+import html
 import json
 import os
 from pathlib import Path
@@ -38,10 +39,16 @@ def fixture(path):
     db = sqlite3.connect(path)
     db.executescript("""
         PRAGMA journal_mode=WAL;
-        CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, status INTEGER, email_address TEXT, password_digest TEXT);
+        CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, status INTEGER, email_address TEXT, password_digest TEXT, bio TEXT, role INTEGER DEFAULT 0, updated_at TEXT DEFAULT '2026-01-01 00:00:00', created_at TEXT DEFAULT '2026-01-01 00:00:00');
         CREATE TABLE sessions (id INTEGER PRIMARY KEY, user_id INTEGER, token TEXT,
                                created_at TEXT, updated_at TEXT, last_active_at TEXT);
-        CREATE TABLE rooms (id INTEGER PRIMARY KEY, name TEXT, type TEXT, updated_at TEXT);
+        CREATE TABLE rooms (id INTEGER PRIMARY KEY, name TEXT, type TEXT, updated_at TEXT, created_at TEXT DEFAULT '2026-01-01 00:00:00');
+        CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT, join_code TEXT, custom_styles TEXT, updated_at TEXT, settings TEXT);
+        INSERT INTO accounts VALUES (1, 'Test Campfire', 'test-join', NULL, '2026-01-01 00:00:00', '{}');
+        CREATE TABLE active_storage_attachments (id INTEGER PRIMARY KEY, blob_id INTEGER, name TEXT, record_type TEXT, record_id INTEGER);
+        CREATE TABLE active_storage_blobs (id INTEGER PRIMARY KEY, filename TEXT, content_type TEXT, metadata TEXT);
+        CREATE TABLE boosts (id INTEGER PRIMARY KEY, message_id INTEGER, booster_id INTEGER, content TEXT, created_at TEXT);
+        CREATE TABLE searches (id INTEGER PRIMARY KEY, user_id INTEGER, query TEXT, updated_at TEXT);
         CREATE TABLE memberships (room_id INTEGER, user_id INTEGER, involvement TEXT,
                                   unread_at TEXT, updated_at TEXT, connected_at TEXT);
         CREATE TABLE messages (id INTEGER PRIMARY KEY, room_id INTEGER, creator_id INTEGER,
@@ -64,6 +71,8 @@ def fixture(path):
                     else f"Message number {i}"))
     db.execute("INSERT INTO messages(id,room_id,creator_id,client_message_id,created_at) VALUES (101,2,2,'hidden','2026-10-01T01:00:00')")
     db.execute("INSERT INTO message_search_index(rowid,body) VALUES (101,'Coffee secret')")
+    for mid, text in db.execute("SELECT rowid,body FROM message_search_index").fetchall():
+        db.execute("INSERT INTO action_text_rich_texts(name,record_type,record_id,body) VALUES ('body','Message',?,?)", (mid, html.escape(text)))
     if os.name != "nt":
         crypt = ctypes.CDLL(ctypes.util.find_library("crypt"))
         crypt.crypt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
@@ -196,6 +205,7 @@ def main():
 
                         db.execute("UPDATE rooms SET name='Renamed & room' WHERE id=1")
                         db.execute("UPDATE message_search_index SET body='Updated message 100' WHERE rowid=100")
+                        db.execute("UPDATE action_text_rich_texts SET body='Updated message 100' WHERE record_id=100")
                         db.commit()
                         status, body, headers = request(route, connection=conn)
                         assert status == 200 and headers["X-Campfire-Cache"] == "miss"
@@ -225,7 +235,7 @@ def main():
                 row = db.execute("SELECT m.room_id,m.creator_id,m.client_message_id,rt.body,idx.body FROM messages m "
                                  "JOIN action_text_rich_texts rt ON rt.record_id=m.id AND rt.record_type='Message' "
                                  "JOIN message_search_index idx ON idx.rowid=m.id WHERE m.id=?", created).fetchone()
-                assert row == (1, 1, "new-client", f"<div>{posted}</div>", posted), row
+                assert row == (1, 1, "new-client", posted, posted), row
                 assert ids(request("/rooms/1")[1])[-1] == created[0]
                 assert ids(request("/searches?q=a123beef")[1]) == created
                 denied = dict(fields, **{"Sec-Fetch-Site": "cross-site"})

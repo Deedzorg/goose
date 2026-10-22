@@ -2,6 +2,8 @@
 set -eu
 cd /workspace
 python3 bench/campfire/prepare.py
+python3 bench/campfire/compile_views.py
+python3 bench/campfire/compile_assets.py
 cmake -S . -B build/campfire/linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DGOOSE_BUILTIN_LIBS=none -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang
 cmake --build build/campfire/linux --parallel 4
 export GOOSE_HOME=/workspace/bench/campfire/build/home-linux
