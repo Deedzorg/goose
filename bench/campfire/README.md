@@ -331,8 +331,9 @@ MIME type of all 315 assets served by Goose.
 
 The optimized binary passed all 27 comparisons against each reference, with
 Goose caching disabled for Rust and enabled for Jai. Receipts are
-`bench/campfire/build/parity-wal-rust/result.json` and
-`bench/campfire/build/parity-wal-jai/result.json`. Synthetic and shared fixture
+`bench/campfire/build/parity-final-rust/result.json` and
+`bench/campfire/build/parity-final-jai/result.json`; these use the exact binary
+measured below. Synthetic and shared fixture
 tests also passed with caching enabled and disabled, including concurrent writes,
 rollback and subsequent writes, revocation and unread membership semantics.
 
@@ -349,7 +350,7 @@ Receipts are `write-profile-before-2`, `write-profile-after` and
 `CAMPFIRE_PROFILE_WRITES=1`, or pass `--profile-writes` to the shared benchmark,
 to aggregate context/wait/SQL/render/commit/cleanup durations every 1,024 writes
 per worker. These measurements include instrumentation and do not isolate each
-change within a stage. The final three-way comparison must disable profiling.
+change within a stage. The completed three-way comparison below disables profiling.
 
 ## Build and test
 
@@ -441,6 +442,81 @@ directory mounted at its WSL path, as above, so revision and cleanliness checks
 can follow the worktree pointer. Published defaults are Rust `main` (resolved to an immutable
 image before starting) and Jai `e56ba63`, the image linked by its README;
 unpublished Jai changes are outside this comparison.
+
+### Results with rendering parity, 2026-10-22
+
+The completed receipt is `bench/campfire/build/shared-render-parity-1/summary.json`,
+from clean revision `8d3da3fb2d9fcc22ec31625da40d83c318cf3670`, executable SHA-256
+`e8e8618bbbd66384afca87370a7bb4e5f253d516158f2e0f883c8e3ef924b7d9`.
+The log is `build/campfire/shared-render-parity-1.log` in this worktree.
+The compiler remains `d9573d81`; no compiler change was needed for this work.
+
+The same AMD Ryzen 9 9950X3D / WSL2 machine, native WSL SQLite storage, four server
+cores (0/2/4/6), separate generator cores (8/10/12/14), 2 GiB container limit,
+gzip and 16 persistent clients were used for all implementations. Each of three
+rotating rounds used a two-second warmup and eight-second sample. No builds or
+other tests from this task ran concurrently. Profiling was disabled. References
+were pinned by immutable image ID:
+
+- Rust `6dae2fd3c1a2dce61ca11beb731bcce2b42b67ad`,
+  `sha256:98ba156f688c3fe856afd71655f613a6620bc03754f456ed2ef08fb2e5527e6e`.
+- Published Jai `e56ba63`,
+  `sha256:014651a89f16953fab46cc3f322019d932d37ff1a098d98fb71bdf2e976caf92`.
+
+All **54 timed samples** passed. Including preflights and warmups, **35,026,917
+responses** were validated with **zero transport errors or invalid responses**.
+The shared SQL audit verified **540,060 acknowledged writes**: 261,262 Goose,
+120,550 Rust and 158,248 Jai. All 18 disposable databases passed row-count, FTS,
+Action Text and SQLite integrity checks. The source seed and executable hashes
+were unchanged. Each eight-second mixed sample acknowledged 79 writes at its
+configured ten-posts/s rate.
+
+Median valid requests per second:
+
+| Workload | Goose | Rust | Jai |
+| --- | ---: | ---: | ---: |
+| Room | 166,343 | 29,446 | 72,269 |
+| Older messages | 170,286 | 28,582 | 74,004 |
+| Sidebar | 179,281 | 31,021 | 76,046 |
+| Search | 171,635 | 31,415 | 75,543 |
+| POST message | 8,599 | 4,215 | 5,301 |
+| Room with ten posts/s in another room | 163,171 | 28,039 | 71,075 |
+
+Goose's room-read ratios are **5.65x Rust / 2.30x Jai**; write ratios are
+**2.04x / 1.62x**; mixed-room ratios are **5.82x / 2.30x**. Goose room rounds were
+148,366 / 168,836 / 166,343 requests/s, and write rounds were
+8,621 / 8,525 / 8,599. These short measurements have visible variation and do not
+establish maximum capacity or sustained production performance.
+
+Median per-run latency and sampled resources:
+
+| Metric | Goose | Rust | Jai |
+| --- | ---: | ---: | ---: |
+| Room p99, ms | 0.242 | 1.143 | 0.463 |
+| POST p99, ms | 7.291 | 8.823 | 7.555 |
+| Mixed room p99, ms | 0.247 | 1.355 | 0.485 |
+| Server CPU cores used, room | 2.05 | 3.32 | 2.76 |
+| Server CPU cores used, POST | 1.75 | 2.90 | 2.31 |
+| Anonymous resident MiB after room | 150.5 | 22.1 | 44.9 |
+| Anonymous resident MiB after POST | 154.2 | 91.9 | 108.3 |
+
+Memory is an anonymous-resident cgroup sample after a route, not peak or total
+resident memory. Goose uses more memory, including its fixed 64 MiB response
+cache. Generator CPU for room reads was 3.25 / 1.14 / 1.87 cores respectively;
+this comparison includes each application's response and caching strategies.
+
+The first-round room responses were 416,155 / 416,121 / 416,121 decoded bytes
+and about 28.5 / 24.2 / 20.6 KB compressed. Goose now emits equivalent tested
+markup and content; remaining byte differences include ordinary whitespace,
+base URLs and compression choices. The separate differential tests above check
+structure, attributes and text beyond the shared benchmark contracts. They also
+exercise cache invalidation after foreign content edits without timestamp changes.
+
+This is a lead for these validated workloads and pinned implementations. It is
+not evidence that Goose is intrinsically faster as a language or that the full
+applications are equivalent: the unimplemented browser actions and attachment
+serving listed above remain outside this comparison. The experiment remains on
+`codex/campfire-experiment` in its own worktree, with nothing landed on master.
 
 ### Historical results before rendering parity, 2026-10-21
 
