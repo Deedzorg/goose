@@ -126,8 +126,17 @@ def main():
                        "reference": getattr(args, f"{app}_image"), "labels": config.get("Labels", {}),
                        "revision": (config.get("Labels") or {}).get("org.opencontainers.image.revision", image_env.get("GIT_REVISION"))}
     # The checkout is shared with Windows; Git normalizes CRLF and ignores its synthetic executable bits.
-    git = lambda directory, *rest: command("git", "-c", f"safe.directory={directory}", "-c", "core.autocrlf=true",
-                                          "-c", "core.filemode=false", "-C", directory, *rest).stdout.strip()
+    def git(directory, *rest):
+        options = ["git", "-c", f"safe.directory={directory}", "-c", "core.autocrlf=true",
+                   "-c", "core.filemode=false", "-C", directory]
+        pointer = directory / ".git"
+        if pointer.is_file():
+            gitdir = pointer.read_text().strip().removeprefix("gitdir: ")
+            # Windows-managed worktrees retain a drive-letter path inside WSL.
+            if len(gitdir) > 2 and gitdir[1:3] == ":/":
+                gitdir = "/mnt/" + gitdir[0].lower() + gitdir[2:]
+                options += [f"--git-dir={gitdir}", f"--work-tree={directory}"]
+        return command(*options, *rest).stdout.strip()
     metadata = {
         "complete": False, "started_at": datetime.now(timezone.utc).isoformat(),
         "scope": "Shared HTTP contracts and audited plain-text posts; not complete application parity",

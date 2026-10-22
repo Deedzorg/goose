@@ -8,7 +8,9 @@ audited message writes. The current renderer also matches the pinned Rust and
 published Jai responses in 27 differential cases each. This establishes parity
 for the tested rendered responses, not the complete application.
 The files are contained under `bench/campfire` so the experiment can be moved to
-its own repository later. It is not on `master`.
+its own repository later. It is not on `master`. The active worktree is
+`C:\Users\woute\.codex\worktrees\campfire-experiment\goose`; the primary
+checkout is free of this experiment.
 
 ## Compiler status
 
@@ -420,11 +422,12 @@ to have the same absolute paths in the runner and Docker host. For this machine:
 ```sh
 mkdir -p /tmp/goose-campfire-comparison
 docker run --rm --network host \
-  -v /mnt/c/W/goose:/mnt/c/W/goose \
+  -v /mnt/c/Users/woute/.codex/worktrees/campfire-experiment/goose:/mnt/c/Users/woute/.codex/worktrees/campfire-experiment/goose \
+  -v /mnt/c/W/goose/.git:/mnt/c/W/goose/.git:ro \
   -v /tmp/goose-campfire-comparison:/tmp/goose-campfire-comparison \
   -v /usr/bin/docker:/usr/local/bin/docker:ro \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  --workdir /mnt/c/W/goose goose-campfire-toolchain:latest \
+  --workdir /mnt/c/Users/woute/.codex/worktrees/campfire-experiment/goose goose-campfire-toolchain:latest \
   python3 bench/campfire/benchmark_shared.py \
   --verification build/campfire/reference/verification \
   --seed build/campfire/reference/shared-seed \
@@ -433,7 +436,9 @@ docker run --rm --network host \
 ```
 
 Add `--preflight-only` for validation without timing. Use a new output directory
-for every run. Published defaults are Rust `main` (resolved to an immutable
+for every run. Windows-managed worktrees also need the main repository Git
+directory mounted at its WSL path, as above, so revision and cleanliness checks
+can follow the worktree pointer. Published defaults are Rust `main` (resolved to an immutable
 image before starting) and Jai `e56ba63`, the image linked by its README;
 unpublished Jai changes are outside this comparison.
 
