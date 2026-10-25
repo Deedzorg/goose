@@ -100,6 +100,6 @@ fn main() {
     let s2 = pool.alloc_index(Item { 12, 2.0 });   // takes slot s0 back
     print("slots ", s0, " ", s1, " ", s2, ", pool length ", pool.items.len);
     let node: Item& = pool.alloc_ref(Item { 13, 3.0 });
-    pool.free(pool.items.index_of(node));                // a reference turned back into its slot
+    pool.free_ref(node);
     print("pool length ", pool.items.len);
 }

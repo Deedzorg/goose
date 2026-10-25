@@ -43,8 +43,8 @@ def source_for(template, backend, n, live, width, mode, calls, reuse_api="index"
         template = template.replace(old, new)
     if backend == "slot_pool_builder":
         def builder(m):
-            call = "p.alloc_with() { " + m[2] + " }"
-            return "p.items.index_of(" + call + ")" if m[1] == "index" else call
+            method = "alloc_index_with" if m[1] == "index" else "alloc_with"
+            return "p." + method + "() { " + m[2] + " }"
         template, count = re.subn(r"p\.alloc_(index|ref)\((Item \{ [^\n]*? \})\)",
                                   builder, template)
         if count != 4:

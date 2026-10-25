@@ -80,7 +80,7 @@ recursive fn release(n: Node&) {
         release(e);
     }
     runs.free_slice(n.entries);
-    nodes.free(nodes.items.index_of(n));
+    nodes.free_ref(n);
 }
 
 // rm -r: unlinked from its directory, then given back.

@@ -35,7 +35,7 @@ recursive fn free_tree(n: Node&) {
     if l { free_tree(l); }
     let r = n.r;
     if r { free_tree(r); }
-    pool.free(pool.items.index_of(n));
+    pool.free_ref(n);
 }
 
 fn get_hash(n: Node&) -> i64 { if n.has_hash { n.hash } else { -1 } }

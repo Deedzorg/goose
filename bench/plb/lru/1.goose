@@ -11,7 +11,7 @@ import dictionary;
 struct Node { key: u32, val: u32, prev: Node&<u32 in pool.items>, next: Node&<u32 in pool.items> }
 
 var pool = slot_pool<Node> {};
-let head = pool.items.index_of(pool.alloc_with() { Node { key: 0, val: 0, prev: self, next: self } });
+let head = pool.alloc_index_with() { Node { key: 0, val: 0, prev: self, next: self } };
 
 struct Lcg { seed: u32 }
 

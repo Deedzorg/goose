@@ -12,7 +12,7 @@
 // `slots` *into* the pool, which a self-relative offset cannot express at all
 // since the two ends are in different arrays. So the map holds references and
 // still fits 8-byte slots, matching the vector-arena-with-u32-indices shape
-// the C++ and Rust versions use, and `pool.free(pool.items.index_of(n))` is what
+// the C++ and Rust versions use, and `pool.free_ref(n)` is what
 // turns a link back into a freelist index. A pool-relative store is a
 // subtraction from a base that is loop-invariant in a register rather than
 // from the field's own address, and the whole lookup path has no `&pool.items[i]`
@@ -116,7 +116,7 @@ fn main() {
             if f {
                 unlink(f);
                 map_remove(at);
-                pool.free(pool.items.index_of(f));
+                pool.free_ref(f);
                 count--;
                 removes++;
             }
@@ -137,7 +137,7 @@ fn main() {
             unlink(lru);
             let lat = find(lru.key);
             map_remove(lat);
-            pool.free(pool.items.index_of(lru));
+            pool.free_ref(lru);
             count--;
             // The deletion may have shifted entries in this key's probe run,
             // so the empty slot found above can be stale.

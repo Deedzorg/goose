@@ -78,8 +78,8 @@ fn main() {
     mask = (nslots - 1) as u64;
     for s in nslots { slots.push(Slot { key: 0, idx: -1 }); }
     // Two sentinels: the list is never empty, so no link is null in practice.
-    let hi = pool.items.index_of(pool.alloc_with() { Node { key: -1, val: 0 } });
-    let ti = pool.items.index_of(pool.alloc_with() { Node { key: -1, val: 0 } });
+    let hi = pool.alloc_index_with() { Node { key: -1, val: 0 } };
+    let ti = pool.alloc_index_with() { Node { key: -1, val: 0 } };
     pool.items[hi].next .= pool.items[ti];
     pool.items[ti].prev .= pool.items[hi];
     var count = 0;
@@ -127,7 +127,7 @@ fn main() {
             // so the empty slot found above can be stale.
             ins = find(key);
         }
-        let ni = pool.items.index_of(pool.alloc_with() { Node { key: key as i32, val: (key % 1000) as i32 } });
+        let ni = pool.alloc_index_with() { Node { key: key as i32, val: (key % 1000) as i32 } };
         slots[ins] = Slot { key: key as i32, idx: ni as i32 };
         link_front(pool.items[hi], pool.items[ni]);
         count++;

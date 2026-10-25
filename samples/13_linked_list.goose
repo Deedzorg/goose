@@ -16,7 +16,7 @@ struct Node { val: i64, prev: Node&<u32 in pool.items>, next: Node&<u32 in pool.
 
 var pool = slot_pool<Node> {};
 // The sentinel: slot 0, allocated before main runs.
-let head = pool.items.index_of(pool.alloc_with() { Node { val: 0, prev: self, next: self } });
+let head = pool.alloc_index_with() { Node { val: 0, prev: self, next: self } };
 
 // Inserts a node holding v after p, and returns it.
 fn insert_after(p: Node&, v: i64) -> Node& {
@@ -34,7 +34,7 @@ fn insert_after(p: Node&, v: i64) -> Node& {
 fn remove(n: Node&) {
     n.prev.next .= n.next;
     n.next.prev .= n.prev;
-    pool.free(pool.items.index_of(n));
+    pool.free_ref(n);
 }
 
 fn push_front(v: i64) -> Node& { insert_after(pool.items[head], v) }
