@@ -1,4 +1,4 @@
-// runtime-debug: paired traces check placement, contents, shrinking and retained views.
+// runtime-debug all-levels: paired traces check placement, contents, shrinking and retained views.
 import slice_pool;
 fn next(r: u64) -> u64 { r * 6364136223846793005 + 1442695040888963407 }
 fn main() {

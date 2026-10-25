@@ -1,4 +1,4 @@
-// runtime-debug: differential allocation/free traces against unchanged reusable.
+// runtime-debug all-levels: differential allocation/free traces against unchanged reusable.
 import slot_pool;
 
 struct Item { key: i64, stamp: i64 }

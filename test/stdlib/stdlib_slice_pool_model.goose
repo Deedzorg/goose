@@ -1,4 +1,4 @@
-// runtime-debug: short runs of a byte pool allocated, freed and resized many times over, as a cache of strings does, with free spans enough for a tree of several levels: every placement is the one a plain model of §5.4 makes.
+// runtime-debug all-levels: short runs of a byte pool allocated, freed and resized many times over, as a cache of strings does, with free spans enough for a tree of several levels: every placement is the one a plain model of §5.4 makes.
 // The model keeps the free spans in index order in two arrays. A run goes at
 // the front of the first span that holds it, else at the end of the pool,
 // starting with a free span that reaches the end; freed elements merge with
