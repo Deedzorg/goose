@@ -62,9 +62,9 @@ def prepare(compiler, source, binary, goose, level, metric):
                                exe_sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
 
 
-def measure(argv):
+def measure(argv, *, cwd=None, log=None):
     start = time.perf_counter()
-    with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as p:
+    with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd) as p:
         try:
             stdout, stderr = p.communicate(timeout=180)
         except subprocess.TimeoutExpired:
@@ -72,6 +72,8 @@ def measure(argv):
             p.communicate()
             raise
         seconds = time.perf_counter() - start
+        if log is not None:
+            Path(log).write_text(stdout + stderr, encoding="utf-8")
         if p.returncode:
             raise RuntimeError(stdout + stderr)
         cycles = None
