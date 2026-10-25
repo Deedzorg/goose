@@ -1,48 +1,23 @@
-# Root structs: library state with independent storage
+# Root structs: state with independent storage
 
-Status: root structs v1, stdlib `slot_pool` and stdlib `slice_pool` are implemented.
-**`reusable` and `reusable[]` are deprecated** in favor of
-[`slot_pool<T>`](../stdlib.md#slot_pool) and [`slice_pool<T>`](../stdlib.md#slice_pool).
-The builtins remain available; removal waits for the remaining migration work.
-Parsing, declaration validation and independent local/global components work,
-including field references passed to ordinary functions, per-component shrink checks,
-serialization and stack restoration. Direct field accesses retain the existing
-stack-top caching and immutable array-reference aliases. Each component has a
-synthetic variable identity sharing its owner's lifetime; ordinary packed fields
-inside a component continue to share that component's region.
-The backend currently materializes a private descriptor pointing at component
-storage; direct projections resolve to the underlying local/global locations.
-Whole-owner references use a pointer to this descriptor. Parameter classes keep
-component paths in return and mutation summaries, including when a separate
-argument names the same component. Local aliases, stored/optional references,
-returned references and captures work. Immutable owner parameters with distinct,
-exact storage cache component tops and lengths; descriptor accesses share memory
-tops where aliases prevent independent caches. Existing loop-view hoisting also
-handles root fields.
-
-Workers may construct local roots, but cannot reach a root global through direct
-access or calls. Unused root globals do not prevent worker compilation.
-
-Reference-containing fields retain per-component store records, including
-writes through calls and reads through aliases of the whole owner. Default
-formatting, custom format hooks and compile-time field reflection inspect owners
-by reference. Borrowed owner links may form cycles without owning nesting.
-Root literals must be immediate declaration initializers;
-`State { .. }` supplies field defaults. Root padding is rejected because the owner
-has no packed layout; put padding in an ordinary component struct instead.
-
-The following records the v1 contract and the separately identified follow-ups.
-The library pools have differential tests and native benchmarks. Existing
-reusable syntax and runtime behavior remain unchanged during deprecation.
+Status: root structs v1 and the `slot_pool`/`slice_pool` modules are implemented.
+`reusable` and `reusable[]` remain available but are deprecated in favor of the
+library pools. Owners have independent local/global components, borrowed owner
+references, per-component lifetime checks and known-global codegen. Whole-owner
+copying, nesting, serialization and automatic worker transfer remain deferred.
+The [migration guide](../stdlib.md#migrating-from-reusable) describes the remaining
+compatibility differences; the [benchmark report](../../bench/pool_workloads.md)
+records current measurements and performance follow-ups.
 
 ## Motivation
 
-A library should be able to package its state in one type, initialized by one
-declaration. Today a struct may contain only one resizable value, on its tail.
-A library needing two independently growing arrays must ask its user to declare
-both arrays and assemble a borrowed context. This makes library state awkward
-to instantiate and expose, even when its complete storage requirements are
-known statically.
+Structs bundle related state. An ordinary Goose struct is a single contiguous
+piece of memory and can contain at most one resizable value, on its tail.
+Root structs lift that storage limitation while restricting where the owner
+may be declared. Several arrays can grow independently, and fixed fields can
+live beside them, all accessed through ordinary field syntax. Libraries are an
+important use: users can instantiate complete library state in one declaration
+instead of supplying separate arrays and a borrowed context.
 
 Root structs group independently stored values under one owning lifetime. They
 do not put several growing arrays into one contiguous byte image, relocate
@@ -610,21 +585,17 @@ freelist policy with root-reference overhead.
 
 ### V1 validation record
 
-The Windows x64 baseline passed on 2026-10-16 with MSVC and TinyCC, including
-1,175 parse/round-trip/typecheck checks, 556 native O0/O2 program checks, 138
-runtime-debug checks, 673 JIT runs, the compiler root-domain tests, generated-C
-cache/hoisting assertions, and the runnable reference examples. The focused
-assertion-enabled compiler pass also accepted/rejected all 65 root-specific
-fixtures as expected, including optimized code generation for positive cases.
+The Windows x64 baseline passed on 2026-10-25 with MSVC and TinyCC, including
+1,429 parse/round-trip/typecheck checks, 682 native program checks, 191
+runtime-debug checks, 836 JIT runs, the compiler root-domain tests, generated-C
+cache/hoisting assertions, and the runnable reference examples. Root alias,
+recursive capture, pool equivalence and allocator model fixtures also run at O1.
 The baseline includes native worker-local ownership and transitive worker-global
 rejection; TinyCC does not run worker programs. Optional audio/gfx/physics/UI
 modules were not built. Linux/macOS and sanitizer CI were not run locally.
 
-The native performance results above cover a preserved call boundary and the
-existing array caches. They do not establish a performance guarantee for every
-aliasing pattern or a migration result for reusable pools. Implementation steps
-1–4 are complete. Step 5 now has both pool implementations, differential tests
-and repeatable benchmarks. Checked slice positions and length validation are
-implemented, as are global component paths, destination-aware slot construction
-and known global owner propagation. Worker transfer remains, alongside the
-explicit v2 candidates.
+Implementation steps 1–4 are complete. Step 5 has both pool implementations,
+differential tests and repeatable native/TinyCC/JIT benchmarks. Current application
+results and unresolved performance work are in the
+[pool workload report](../../bench/pool_workloads.md). Explicit flat worker snapshots
+are demonstrated; automatic transfer remains a v2 candidate.
