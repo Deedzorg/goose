@@ -1,6 +1,7 @@
 // First-fit runs with coalescing and stable backing storage. Freeing marks a
 // run reusable; existing views remain valid and can observe replacement values.
-// Elements must be fixed-size and defaultable; resizing also requires copying.
+// Elements must be fixed-size. alloc_slice/realloc_slice require defaults;
+// realloc_slice/alloc_copy require normally copyable values.
 // Treat nodes/tree as bookkeeping and do not shrink or replace items directly.
 
 import slice_pool_internal;
@@ -49,7 +50,7 @@ fn free_slice<T>(p: slice_pool<T>&, s: T[:]) {
 }
 
 // Initialize directly from source values, including overlapping views of items.
-fn alloc_copy<T>(p: slice_pool<T>&, src: T[:]) -> T[:] {
+inline fn alloc_copy<T>(p: slice_pool<T>&, src: T[:]) -> T[:] {
     let count = p.items.check_length(src.len);
     let idx = if count == 0 || p.nodes.len == 0 { p.items.len } else { slice_pool_detail::place(p.nodes, p.tree, p.items.len, count) };
     if idx < 0 || idx > p.items.len { abort("slice_pool: invalid free span"); }
@@ -57,8 +58,8 @@ fn alloc_copy<T>(p: slice_pool<T>&, src: T[:]) -> T[:] {
     let available = p.items.len - idx;
     let existing = if count < available { count } else { available };
     // Append beyond all source elements before overwriting a shared prefix.
-    p.items.append(src[existing..]);
-    p.items[idx..idx + existing].move_from(src[..existing]);
+    if existing < count { p.items.append(src[existing..]); }
+    if existing != 0 { p.items[idx..idx + existing].move_from(src[..existing]); }
     return p.items[idx..end];
 }
 fn realloc_slice<T>(p: slice_pool<T>&, s: T[:], n: i64) -> T[:] {
