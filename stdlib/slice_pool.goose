@@ -16,15 +16,6 @@ inline fn slice_pool_detail::defaults<T>(p: slice_pool<T>&, first: i64, end: i64
     for i in reused.len { reused[i] .= default<T>(); }
     for i in p.items.len..end { p.items.push(default<T>()); }
 }
-inline fn slice_pool_detail::move<T>(dst: T[:], src: T[:], backward: bool) {
-    assert(dst.len == src.len);
-    if backward {
-        var j = dst.len;
-        while j > 0 { j--; dst[j] .= src[j]; }
-    } else {
-        for j in dst.len { dst[j] .= src[j]; }
-    }
-}
 
 // Copy before defaulting, with memmove ordering even when a freed prefix lets
 // the new run overlap the old one. New array elements are always initialized.
@@ -38,7 +29,7 @@ fn slice_pool_detail::finish<T>(p: slice_pool<T>&, idx: i64, n: i64, old_idx: i6
         // The destination tail is past all source elements, so it can be
         // appended before moving the overlapping existing prefix backward.
         p.items.append(old[existing..]);
-        slice_pool_detail::move(p.items[idx..idx + existing], old[..existing], idx > old_idx);
+        p.items[idx..idx + existing].move_from(old[..existing]);
     }
     slice_pool_detail::defaults(p, idx + old.len, end);
     return p.items[idx..end];
@@ -55,6 +46,20 @@ inline fn alloc_slice<T>(p: slice_pool<T>&, n: i64) -> T[:] {
 fn free_slice<T>(p: slice_pool<T>&, s: T[:]) {
     let idx = p.items.range_index(s);
     slice_pool_detail::release_run(p.nodes, p.tree, idx, s.len);
+}
+
+// Initialize directly from source values, including overlapping views of items.
+fn alloc_copy<T>(p: slice_pool<T>&, src: T[:]) -> T[:] {
+    let count = p.items.check_length(src.len);
+    let idx = if count == 0 || p.nodes.len == 0 { p.items.len } else { slice_pool_detail::place(p.nodes, p.tree, p.items.len, count) };
+    if idx < 0 || idx > p.items.len { abort("slice_pool: invalid free span"); }
+    let end = p.items.check_length(idx + count);
+    let available = p.items.len - idx;
+    let existing = if count < available { count } else { available };
+    // Append beyond all source elements before overwriting a shared prefix.
+    p.items.append(src[existing..]);
+    p.items[idx..idx + existing].move_from(src[..existing]);
+    return p.items[idx..end];
 }
 fn realloc_slice<T>(p: slice_pool<T>&, s: T[:], n: i64) -> T[:] {
     let count = p.items.check_length(n);
