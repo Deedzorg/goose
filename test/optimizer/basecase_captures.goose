@@ -6,6 +6,14 @@ recursive fn digits(d: i64) -> i64 {
     if d == 1 { return give() { d }; }
     return digits(d - 1) * 10 + d;
 }
+recursive fn constant(d: i64) -> i64 {
+    if d == 1 { return give() { 1 }; }
+    return constant(d - 1) * 10 + d;
+}
+recursive fn written(var d: i64) -> i64 {
+    if d == 1 { return give() { d += 10; d }; }
+    return written(d - 1) * 10 + d;
+}
 recursive fn references(d: i64, value: i64&) -> i64 {
     if d == 1 { return nested() { value + d }; }
     return references(d - 1, value) * 10 + d;
@@ -38,6 +46,7 @@ fn main() {
     var pool = slot_pool<Node> {};
     var value = 1;
     assert(digits(3) == 123);
+    assert(constant(3) == 123 && written(3) == 1123);
     assert(references(3, value) == 223);
     assert(local_function(3) == 123 && nonlocal(3) == 123);
     assert(sum(build(pool, 4)) == 26);

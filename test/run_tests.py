@@ -1010,6 +1010,7 @@ class Runner:
         # Guarded base-case inlining: a copy of the body's first statement
         # per self-call site the rewrite took.
         copies = {
+            "gb_callback": 3 if optimized else 1,
             "gb_build": 3 if optimized else 1,
             "gb_walk": 2 if optimized else 1,
             "gb_count": 3 if optimized else 1,
