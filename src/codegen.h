@@ -704,7 +704,7 @@ struct CodeGen {
         string root;      // The header's spelling, which other mentions would share.
     };
     vector<LenSlot> lenslots;
-    void NoteLen(const string &stk, const string &lenlv);
+    void NoteLen(const string &stk, const string &lenlv, const string &component = {});
     static bool LenRoot(const string &lenlv, string &root);
     bool cachetops = false;             // Any class below is cached.
     bool topown = false;                // Own indexed stacks, `GS(gs_sp + k)`.
@@ -809,6 +809,7 @@ struct CodeGen {
         // reference itself) -- so evaluating s later may reach other storage.
         bool viaref = false;
         string stk, lenlv, fl, flstk;
+        string lenroot;         // Stable root-component header for length caching.
         string hdr;            // The resizable's own header/frame-object lvalue, when it has one.
         // A loop-hoisted view of the array behind this reference (see `views`):
         // set on the reference by VarLoc, and, for the length, carried across

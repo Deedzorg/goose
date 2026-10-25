@@ -653,9 +653,9 @@ inline string_view CodeGen::NextLine(const string &b, size_t &i, size_t &ind0) {
 
 // The count a growth site writes, for caching with the stack's top when its
 // header qualifies (LenSlot).
-inline void CodeGen::NoteLen(const string &stk, const string &lenlv) {
-    string root;
-    if (!CacheableStk(stk) || !LenRoot(lenlv, root)) return;
+inline void CodeGen::NoteLen(const string &stk, const string &lenlv, const string &component) {
+    string root = component;
+    if (!CacheableStk(stk) || (root.empty() && !LenRoot(lenlv, root))) return;
     auto k = TopIdx(stk);
     for (auto &s : lenslots) if (s.stk == k && s.lenlv == lenlv) return;
     lenslots.push_back({ k, lenlv, root });
@@ -679,14 +679,6 @@ inline bool CodeGen::LenRoot(const string &lenlv, string &root) {
     };
     auto n = lenlv.size();
     if (ends(".hdr->len") && ident(0, n - 9)) {
-        root = lenlv.substr(0, n - 5);
-        return true;
-    }
-    // An immutable root parameter's component has a stable descriptor slot.
-    // RefTopsOk has already ruled out another spelling of its stack.
-    auto member = lenlv.find(").");
-    if (lenlv.starts_with("(*") && member != string::npos && ends(".hdr->len") &&
-        ident(2, member) && ident(member + 2, n - 9)) {
         root = lenlv.substr(0, n - 5);
         return true;
     }

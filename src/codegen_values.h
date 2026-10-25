@@ -134,6 +134,7 @@ inline void CodeGen::DerefLoc(Loc &lv) {
         nl.s = lv.hbase.empty() ? cat(rv, ".hdr->base") : lv.hbase;
         // Growth writes the header even where the reads come from a hoist.
         nl.lenlv = cat(rv, ".hdr->len");
+        nl.lenroot = lv.lenroot;
         nl.hlen = lv.hlen;
         nl.viaref = lv.viaref;
         nl.stk = cat(rv, ".stk");
@@ -915,6 +916,7 @@ inline CodeGen::Loc CodeGen::FieldLocAt(Loc lv, int fieldidx) {
             r.t = ast.RefTo(ft, lv.t->line);
             r.val = true;
             r.s = cat(lv.s, ".", Sanitize(si->st->fields[fieldidx].name));
+            if (ft->kind == TY_ARRAY && IsResz(ft)) r.lenroot = cat(r.s, ".hdr");
             r.viaref = lv.viaref || ft->kind == TY_REF;
             DerefLoc(r);
             return r;
@@ -927,6 +929,7 @@ inline CodeGen::Loc CodeGen::FieldLocAt(Loc lv, int fieldidx) {
             r.hbase.clear();
             r.hlen.clear();
             r.lenlv.clear();
+            r.lenroot.clear();
             if (IsResz(ft)) {
                 // A frame object's tail: its own header (or a nested
                 // frame object) is the member.
