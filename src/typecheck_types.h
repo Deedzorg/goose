@@ -1690,7 +1690,8 @@ inline void TypeCheck::AppendArrayElemsReached(TypeExpr *t, vector<TypeExpr *> &
 inline bool TypeCheck::RootedAtReceiver(const Val &rv, const Val &av, TypeExpr *elem) {
     if (!av.Exact() || !rv.Exact()) return false;
     auto recvroot = rv.Root(), aroot = av.Root();
-    if (aroot != recvroot && !(recvroot && recvroot->isglobal && PoolOf(aroot) == recvroot))
+    auto recvpool = PoolOf(recvroot);
+    if (aroot != recvroot && !(recvpool && PoolOf(aroot) == recvpool))
         return false;
     return OneArrayOf(recvroot, elem);
 }
