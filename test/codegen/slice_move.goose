@@ -1,5 +1,7 @@
 // runtime-debug all-levels
 struct Box { view: i64[:] }
+struct Cell { value: i64 }
+var cells: Cell[>..] = [Cell { 10 }, Cell { 20 }, Cell { 30 }];
 var first: i64[4] = [1, 2, 3, 4];
 var second: i64[4] = [5, 6, 7, 8];
 var target: i64[:] = first[..];
@@ -25,5 +27,8 @@ fn main() {
     var bytes: u8[3] = [0; 3];
     bytes[..].move_from("abc");
     assert(bytes == "abc");
+    var compact: (Cell&<u32 in cells>)[3] = [cells[0], cells[1], cells[2]];
+    compact[1..].move_from(compact[..2]);
+    assert(compact[1] .== cells[0] && compact[2] .== cells[1]);
     print("slice move: ok");
 }

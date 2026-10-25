@@ -3620,7 +3620,11 @@ inline bool Call::BceWalk(BCE &b) {
                          : (args.size() > 1 ? args[1] : nullptr);
         switch (builtin) {
             case B_MOVE_FROM:
-                b.KillArgStorage(rn);
+                // The copy writes the slice captured before the source ran.
+                // A source-side rebind can give the receiver another target.
+                if (b.HasKillEffects(arg0))
+                    b.StorageWriteKill(BCE::UK_OPAQUE, nullptr, nullptr);
+                else b.KillArgStorage(rn);
                 break;
             case B_PUSH:
                 if (recvmoved) b.GrowShrinkKill(rn, 0);
