@@ -98,6 +98,19 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
             c->exprtype = slice;
             return { LoadLoc(lv, slice, ln) };
         }
+        case B_MOVE_FROM: {
+            auto dst = ArrayView(RecvLoc(an[0]));
+            auto data = T(), count = T();
+            L("uint8_t *", data, " = (uint8_t *)(", dst.elems, ");");
+            L("int64_t ", count, " = ", dst.len, ";");
+            auto src = GenPure(an[1]);
+            L("if (", count, " != ", src,
+              ".len) gs_abort_msg((const uint8_t *)\"move_from lengths differ\", "
+              "sizeof(\"move_from lengths differ\") - 1, ", LocArgs(ln), ");");
+            auto size = FixedSize(dst.elem);
+            if (size) L("if (", count, ") memmove(", data, ", ", src, ".data, (size_t)", count, " * ", size, ");");
+            return {};
+        }
         case B_TO_BYTES: return EmitToBytes(an, d0, ln);
         case B_BYTES_OF: return EmitBytesOf(c, an, ln);
         case B_FROM_BYTES: return EmitFromBytes(c, an, d0, ln);

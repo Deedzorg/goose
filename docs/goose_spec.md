@@ -422,6 +422,14 @@ once and changes no storage; it does not reserve space or check the space left
 after the array's current contents. These operations do not weaken `index_of`'s
 static provenance requirement.
 
+`dst.move_from(src)` copies the values of a slice into a writable slice of the
+same fixed-size element type. Lengths must agree; a mismatch aborts before any
+element is written in every build. The copy behaves as though the source values
+were saved first, including when the slices overlap; it does not clear the source.
+Both slices are evaluated once, receiver first. Copying must satisfy the usual
+stored-reference lifetime rules (§9.2), and elements containing self-relative
+references cannot be copied (§3.9). Empty slices, including defaults, are valid.
+
 ### 3.4 Placement rules (what may contain what)
 
 * **fixed** values: anywhere — locals, globals, fields at any position, array
@@ -4113,6 +4121,7 @@ And the array members, ordinary functions of their receiver per UFCS
 | `.index_of(r) -> i64` | fixed, limited, grow-only, grow-shrink | the index of the element `r` refers to (§3.3) |
 | `.range_index(s) -> i64` | the same, fixed-size elements | checked start of a contained slice; zero for empty (§3.3) |
 | `.check_length(n) -> i64` | grow-only, grow-shrink, fixed-size elements | validate a count without allocating (§3.3) |
+| `.move_from(src)` | slices, fixed-size elements | checked equal-length copy, safe for overlapping slices (§3.3) |
 | `.alloc_index(v) -> i64`, `.alloc_ref(v) -> T&`, `.free(i)` | deprecated `reusable` pools | slot reuse (§5.4); prefer stdlib `slot_pool<T>` |
 | `.alloc_slice(n) -> T[:]`, `.realloc_slice(s, n) -> T[:]`, `.free_slice(s)` | deprecated `reusable[]` pools | slice reuse (§5.4); prefer stdlib `slice_pool<T>` |
 

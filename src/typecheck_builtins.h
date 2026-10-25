@@ -336,6 +336,18 @@ inline Val TypeCheck::CheckBuiltin(Call *c, const BuiltinDef &d, vector<Node *> 
                          rv.reusable ? ", not on the slot pools of reusable" : "",
                          notpoolref(RU_SLICES), " (§5.4)"));
     }
+    if (d.kind == B_MOVE_FROM) {
+        if (ClassOf(elem) != SC_FIXED)
+            Error(c, ".move_from requires fixed-size elements");
+        auto sv = CheckV(args[1], nullptr);
+        args[1]->exprtype = sv.type;
+        if (sv.type->kind != TY_SLICE || !TypeEq(sv.type->sub, elem))
+            Error(c, cat(".move_from takes a slice of ", TypeStr(elem), ", got ", TypeStr(sv.type)));
+        if (HasRelRefT(elem))
+            Error(c, ".move_from cannot copy elements containing self-relative references");
+        AppendedCopies(args[1], sv, elem, rv);
+        return VoidVal();
+    }
     // A pending `var x = []` receiver learns its element type from what
     // is first pushed or appended into it (§4.2).
     if (elem && elem->kind == TY_VOID) {

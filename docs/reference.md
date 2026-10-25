@@ -891,6 +891,7 @@ read the same way.
 | `.cap -> i64` | `T[..k]`, `T[..]` | the capacity |
 | `.push(v) -> T&` | limited, grow-only, grow-shrink | one element, constructed in place; returns a reference to it |
 | `.append(src)` | limited, grow-only, grow-shrink | the elements of an array, slice or array literal, copied in |
+| `.move_from(src)` | slices of fixed-size elements | copies equal-length slices with overlap-safe ordering |
 | `.pop() -> T` | limited, grow-shrink; grow-only where a shrink is allowed | removes and returns the last element |
 | `.pop_n(n)` | the same | drops the last `n` elements |
 | `.resize(n, v)`, `.resize(n)` | the same | grows with copies of `v`, or shrinks |
@@ -910,6 +911,11 @@ An empty slice, including a default or foreign empty slice, returns zero.
 exceed a data-stack reservation, including oversized unsigned counts. It neither
 allocates storage nor promises that an append fits the array's remaining space.
 Both checks apply in every build.
+`dst.move_from(src)` requires equal lengths and aborts before writing if they
+differ. It copies the original source values even when the slices overlap;
+the source is not cleared. Both operands are evaluated once, left to right.
+The destination must be writable, and the usual lifetime and relative-reference
+copy restrictions apply. Empty slices may be copied, including default slices.
 The standard-library pool types and deprecated `reusable` operations are in
 [section 14](#14-reusable-pools).
 Spec §3.3, §12.
@@ -3960,7 +3966,7 @@ written in Goose under `stdlib/` and documented in [stdlib.md](stdlib.md).
 | `embed_file(path)`, `embed_shader(…)` | a file's bytes, or a compiled shader, read at compile time | [21](#embed_file) |
 
 The array members, `.len`, `.cap`, `.push`, `.append`, `.pop`, `.pop_n`,
-`.resize`, `.clear`, `.index_of`, `.range_index`, `.check_length` are in
+`.resize`, `.clear`, `.index_of`, `.range_index`, `.check_length`, `.move_from` are in
 [section 5](#members). The stdlib pool APIs and deprecated builtin operations
 `.alloc_index`, `.alloc_ref`, `.free`, `.alloc_slice`, `.realloc_slice`,
 `.free_slice` are in [section 14](#14-reusable-pools).
