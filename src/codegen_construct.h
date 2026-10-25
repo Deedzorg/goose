@@ -1089,6 +1089,11 @@ inline void CodeGen::FixedArrayLitAt(ArrayLit *al, const string &base, bool inro
     auto count = LitCount(al);
     if (et->arr->akind == A_LIMITED) L(base, ".len = ", count, ";");
     if (al->fillval) {
+        int byte;
+        if (!HasRelRef(elem) && UniformFillByte(al->fillval, elem, byte)) {
+            L("memset(", base, ".e, ", byte, ", ", count, " * sizeof(", base, ".e[0]));");
+            return;
+        }
         FillScope fill(*this, al->fillval, elem);
         // Captured values repeat; relative offsets are encoded per slot.
         auto perelem = HasRelRef(elem);
