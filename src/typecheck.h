@@ -573,6 +573,23 @@ struct TypeCheck {
         ErrorIn(LocOf(l), msg, Chain(ActiveExpansionTrace()));
     }
 
+    bool StdlibLocation(DiagLoc at) const {
+        if (at.fileidx < 0 || at.fileidx >= (int)ast.filepkg.size()) return false;
+        auto pkg = ast.filepkg[at.fileidx];
+        return pkg >= 0 && pkg < (int)ast.packages.size() && ast.packages[pkg].stdlib;
+    }
+
+    void LibraryCallLocation(Diagnostic &d) {
+        if (!StdlibLocation(d.where)) return;
+        for (auto &related : d.related) {
+            if (related.where.fileidx < 0 || StdlibLocation(related.where)) continue;
+            auto definition = d.where;
+            d.where = related.where;
+            d.related.insert(d.related.begin(), { definition, "while checking this standard library expression" });
+            return;
+        }
+    }
+
     // An error at code checked earlier, with the instantiation chain taken
     // there: how a check made once the whole program has been reports one.
     // The text echoes the offending source line, with no caret, and then
@@ -585,6 +602,7 @@ struct TypeCheck {
         d.where = where;
         d.message = msg;
         d.related = std::move(chain);
+        LibraryCallLocation(d);
         d.text = ast.DiagnosticText(d, true);
         throw CompileError { d.text, { d } };
     }
@@ -747,6 +765,10 @@ struct TypeCheck {
         Warning w;
         w.diag.where = LocOf(n);
         w.diag.message = msg;
+        if (StdlibLocation(w.diag.where)) {
+            w.diag.related = Chain(n->expansiontrace);
+            LibraryCallLocation(w.diag);
+        }
         w.at = n->Origin();
         if (WarningsHeld()) {
             cur.pendingwarnings.push_back(std::move(w));

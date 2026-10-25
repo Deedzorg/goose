@@ -2381,8 +2381,8 @@ inline void TypeCheck::ValidatePoolArgs(FnSpec *spec, vector<Val> &argvals, Node
         if (!pr->poolclass) continue;
         if (!argvals[i].Exact() || UltimateRoot(pr) != UltimateRoot(argvals[i].Root()))
             Error(callnode, cat("recursive call passes ", spec->params[i]->name,
-                                " rooted differently from the cycle's entry call, which "
-                                "stored references into it (§7.8)"));
+                                " rooted differently from the cycle's entry call; this "
+                                "parameter must keep the same storage throughout the cycle (§7.8)"));
     }
 }
 
