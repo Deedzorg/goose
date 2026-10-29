@@ -194,7 +194,9 @@ def msvc_root():
                / "Microsoft Visual Studio" / "Installer" / "vswhere.exe")
     if not vswhere.exists():
         return None
-    r = subprocess.run([str(vswhere), "-latest", "-prerelease",
+    # -products * as the compiler's own search has it (src/toolchain.h):
+    # without it vswhere leaves out a Build Tools install.
+    r = subprocess.run([str(vswhere), "-latest", "-prerelease", "-products", "*",
                         "-property", "installationPath"],
                        capture_output=True, text=True, errors="replace")
     lines = [l for l in r.stdout.splitlines() if l.strip()]
