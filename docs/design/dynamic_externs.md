@@ -147,7 +147,9 @@ is no C-level conflict to avoid.
 | `"bin/steam_api64"` or `"./x.so"` (a separator) | relative to the program's resources, see below | | |
 
 A bare spelling is passed to the platform's loader as a bare name, so it is
-found through the DLL search order on Windows, through `DYLD_LIBRARY_PATH`
+found on Windows in the program's directory, System32 and then the absolute
+directories of `PATH` (never the current directory, where a planted DLL of
+the same name would otherwise win, CWE-427), through `DYLD_LIBRARY_PATH`
 and the usual places on macOS, and through `LD_LIBRARY_PATH`, the rpath and
 `ld.so.cache` on Linux. Unless it is absolute, a spelling with a separator
 is joined to the program's resource directory (`resource_dir()`,

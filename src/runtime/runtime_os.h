@@ -559,6 +559,57 @@ static int gs_dl_spelling(const gs_dllib *lib, char *buf) {
     return n > 0 && n < GS_OS_PATH_MAX ? n : 0;
 }
 
+#ifdef _WIN32
+/* A library named without a directory, such as SDL2.dll. LoadLibraryW's own
+   search looks in the current directory before PATH, so a program started
+   from a folder holding a planted DLL of that name would load it (CWE-427).
+   This searches the program's directory and System32 (and the directories
+   added with AddDllDirectory), then each absolute directory of PATH, in
+   order, and never the current directory. The error is the first search's
+   when every search fails. */
+#ifndef LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+#define LOAD_LIBRARY_SEARCH_DEFAULT_DIRS 0x00001000  /* Windows 8, or 7 with KB2533623 */
+#endif
+static HMODULE gs_dl_load_bare(const wchar_t *name) {
+    HMODULE h = LoadLibraryExW(name, NULL, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (h) return h;
+    DWORD err = GetLastError();
+    DWORD n = GetEnvironmentVariableW(L"PATH", NULL, 0);
+    wchar_t *path = n ? (wchar_t *)malloc((size_t)n * sizeof(wchar_t)) : NULL;
+    if (path && GetEnvironmentVariableW(L"PATH", path, n) < n) {
+        size_t namelen = wcslen(name);
+        for (wchar_t *dir = path; *dir && !h;) {
+            wchar_t *end = wcschr(dir, L';');
+            if (end) *end = 0;
+            /* Quotes around an entry are the shell's, not the name's. */
+            size_t len = wcslen(dir);
+            if (len >= 2 && dir[0] == L'"' && dir[len - 1] == L'"') { dir++; len -= 2; }
+            /* Only absolute entries: ".", or any relative one, is the
+               current directory again. */
+            int absolute = len >= 3 && dir[1] == L':' && (dir[2] == L'\\' || dir[2] == L'/');
+            absolute = absolute || (len >= 2 && (dir[0] == L'\\' || dir[0] == L'/') &&
+                                    (dir[1] == L'\\' || dir[1] == L'/'));
+            wchar_t full[GS_OS_PATH_MAX];
+            if (absolute && len + 1 + namelen < GS_OS_PATH_MAX) {
+                memcpy(full, dir, len * sizeof(wchar_t));
+                size_t at = len;
+                if (full[at - 1] != L'\\' && full[at - 1] != L'/') full[at++] = L'\\';
+                memcpy(full + at, name, (namelen + 1) * sizeof(wchar_t));
+                for (wchar_t *c = full; *c; c++) if (*c == L'/') *c = L'\\';
+                DWORD attrs = GetFileAttributesW(full);
+                if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+                    h = LoadLibraryExW(full, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+            }
+            if (!end) break;
+            dir = end + 1;
+        }
+    }
+    free(path);
+    if (!h) SetLastError(err);
+    return h;
+}
+#endif
+
 GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *binds,
                        int64_t nbinds) {
     for (int64_t l = 0; l < nlibs; l++) {
@@ -576,12 +627,13 @@ GS_API void gs_dl_bind(const gs_dllib *libs, int64_t nlibs, const gs_dlbind *bin
             /* A path, the resource directory's or an absolute one: the
                libraries it depends on are looked for beside it first, as
                a library shipped with its dependencies under lib/ needs.
-               That search wants backslashes. A bare name keeps the
-               loader's own search. */
+               That search wants backslashes. A bare name is searched
+               for as gs_dl_load_bare says, never in the current
+               directory. */
             int path = 0;
             for (wchar_t *c = wide; *c; c++)
                 if (*c == L'/' || *c == L'\\') { *c = L'\\'; path = 1; }
-            h = path ? LoadLibraryExW(wide, NULL, LOAD_WITH_ALTERED_SEARCH_PATH) : LoadLibraryW(wide);
+            h = path ? LoadLibraryExW(wide, NULL, LOAD_WITH_ALTERED_SEARCH_PATH) : gs_dl_load_bare(wide);
         }
         if (!h) {
             snprintf(msg, sizeof msg, "cannot load %s (%s): Windows error %u", libs[l].name,

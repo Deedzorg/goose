@@ -3833,7 +3833,8 @@ extern "SDL2" {
 ```
 
 `"SDL2"` opens `SDL2.dll`, `libSDL2.dylib` or `libSDL2.so`, found by the
-loader's search. `"bin/steam_api64"` opens that file, with the same
+loader's search; on Windows that is the program's directory, System32 and
+then the absolute directories of `PATH`, never the current directory. `"bin/steam_api64"` opens that file, with the same
 naming rule applied to its last component, under the program's resource
 directory (`resource_dir()`); this is how a program ships a library
 beside itself. A dotted name such as `"libSDL2-2.0.so.0"` is taken as

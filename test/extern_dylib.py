@@ -182,6 +182,28 @@ def check_extern_dylib(exe, cc, base, *, jit, runtime, extra=()):
     tc.write_text(bare, BLOCK % "dltest" + MAIN)
     pathvar = "PATH" if tc.IS_WINDOWS else "DYLD_LIBRARY_PATH" if tc.IS_MACOS else "LD_LIBRARY_PATH"
     expect_output(bare, {pathvar: str(libdir) + os.pathsep + os.environ.get(pathvar, "")})
+    # On Windows the loader's own search looks in the current directory
+    # before PATH, so a program started in a folder holding a planted DLL of
+    # a bare name would load it (CWE-427). The runtime never searches the
+    # current directory: a decoy there, whose add is wrong, is passed over
+    # for the library on PATH, under the JIT and built alike.
+    if tc.IS_WINDOWS:
+        planted = base / "planted"
+        planted.mkdir(exist_ok=True)
+        tc.write_text(base / "decoy.c", LIBRARY_C.replace("return a + b;", "return a + b + 1000;"))
+        ok, log = cc.compile_shared(base / "decoy.c", planted / lib.name, opt=1, extra=extra,
+                                    includes=[tc.REPO_ROOT / "src" / "runtime"])
+        if not ok:
+            raise RuntimeError(f"building the decoy library:\n{log}")
+        env = {"PATH": str(libdir) + os.pathsep + os.environ.get("PATH", "")}
+        runs = [("built", [build(bare, 2)[0]])]
+        if jit:
+            runs.append(("jit", [exe, "--jit", bare]))
+        for how, argv in runs:
+            code, out, err = run(argv, cwd=planted, env=env)
+            if code != 0 or out.split("\n")[:-1] != EXPECTED:
+                raise RuntimeError(f"bare.goose ({how}) in a folder with a planted {lib.name} "
+                                   f"exit {code}:\n{out}{err}\nexpected the library on PATH: {EXPECTED}")
     # The feature's point: a JIT run binds the library with no C toolchain
     # in sight, where a native part would need one.
     if jit:
