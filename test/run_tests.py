@@ -69,12 +69,23 @@ its own; a batch that crashes or does not build leaves its files to runs of
 their own, which report the failure as theirs. --batch 1 runs everything one
 to a process.
 
+--filter narrows the suite to the fixtures whose path under test/ a pattern
+selects, and to the other checks whose name it selects (lsp_protocol,
+samples, goose_in_goose, ...): a pattern selects a name it is part of, or
+one it matches as a glob, ignoring case. A check whose name it does not
+select is not started, and a section left with nothing to show is left out
+of the log. --list prints the fixture files a filter selects, and runs
+nothing. After the FAIL lines, the summary gives a command per failing
+fixture or check that runs it again alone.
+
   python test/run_tests.py [--exe path/to/goose] [--nocgen] [--no-jit] [-j N] [--batch N] [-v]
+                           [--filter PATTERN ...] [--list]
 """
 
 import argparse
 import json
 import concurrent.futures
+import fnmatch
 import os
 import platform
 import re
@@ -90,6 +101,60 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "scripts"))
 import toolchain as tc
+
+
+def fixture_files():
+    """The suite's fixture files, by kind: the positive fixtures, the native
+    modules' rejection tests, and the parse, typecheck and recovery error
+    tests. The positive fixtures are one level of category directories;
+    nested syntax helpers and the modules of the goose_in_goose bootstrap are
+    exercised through their entry points, and the lsp/ fixtures are the
+    language server's, driven by lsp_protocol.py. A native module's (audio,
+    gfx, physics or ui) fixture with error markers is a rejection test, kept
+    beside what it rejects (for gfx, shaders)."""
+    tests = [f for f in sorted(HERE.glob("*/*.goose"))
+             if f.parent.name not in ("errors", "errors_tc", "goose_in_goose", "lsp") and
+             f.name != "lexer_tokens.goose"]
+    native_errors = [f for f in tests if f.parent.name in tc.NATIVE_MODULES and error_markers(f)]
+    tests = [f for f in tests if f not in native_errors]
+    parse_errors = sorted((HERE / "errors").glob("*.goose"))
+    tc_errors = sorted((HERE / "errors_tc").glob("*.goose")) + native_errors
+    recovery = sorted((HERE / "errors_tc" / "recovery").glob("*.goose"))
+    return tests, native_errors, parse_errors, tc_errors, recovery
+
+
+def fixture_name(f):
+    """A fixture's path under test/, which --filter matches and --list prints."""
+    return f.relative_to(HERE).as_posix()
+
+
+def check_name(fn, args):
+    """What --filter matches for one of the suite's other checks: its
+    function's name, and the names and files it is given."""
+    return " ".join([fn.__name__] + [a.name if isinstance(a, Path) else a
+                                      for a in args if isinstance(a, (str, Path))])
+
+
+def selects(patterns, name):
+    """Whether --filter's patterns select `name`: with none, everything; else
+    a name a pattern is part of, or one it matches as a glob (*, ? or [),
+    ignoring case."""
+    if not patterns:
+        return True
+    name = name.lower()
+    for p in (p.lower() for p in patterns):
+        if p in name or (any(c in p for c in "*?[") and fnmatch.fnmatchcase(name, p)):
+            return True
+    return False
+
+
+def rerun_name(line, out):
+    """What --filter takes to run a FAIL line's work again alone: the
+    fixture the line names, or the check that printed it."""
+    m = re.search(r"([\w.+-]+)\.goose\b", line)
+    if m:
+        return m.group(1)
+    return out.name.split()[0] if out.name else None
 
 
 def native_modules(f, native):
@@ -245,6 +310,9 @@ class Out:
         self.text = []
         self.failures = 0
         self.value = None
+        # The check that printed it, for the summary's rerun commands; a
+        # fixture's own Outs have none, their FAIL lines naming the file.
+        self.name = None
 
 
 class Section:
@@ -260,6 +328,8 @@ class Section:
     def __init__(self, title, verbose, github):
         self.title, self.verbose, self.github = title, verbose, github
         self.oks, self.fails, self.failures = 0, [], 0
+        # What --filter takes to run each failure again alone, in order.
+        self.reruns = []
         # "title": the title is on a line not yet ended; "group": a GitHub
         # group is open; None: at the start of a line, outside a group.
         if github:
@@ -284,6 +354,9 @@ class Section:
             else:
                 if line.startswith("FAIL "):
                     self.fails.append(line)
+                    name = rerun_name(line, out)
+                    if name and name not in self.reruns:
+                        self.reruns.append(name)
                 sys.stdout.write({"group": "::endgroup::\n", "title": "\n"}.get(self.state, ""))
                 self.state = None
             sys.stdout.write(line + "\n")
@@ -332,8 +405,13 @@ class Runner:
     def __init__(self, exe, jobs, verbose=False):
         self.exe = exe
         self.failures = 0
-        # Every FAIL line the log printed, with its section's title.
+        # Every FAIL line the log printed, with its section's title, and
+        # what --filter takes to run each failing piece again alone.
         self.failed = []
+        self.reruns = []
+        # --filter's patterns, and the command line a rerun starts from.
+        self.only = []
+        self.rerun_argv = []
         self.verbose = verbose
         self.github = os.environ.get("GITHUB_ACTIONS") == "true"
         self.local = threading.local()
@@ -351,6 +429,10 @@ class Runner:
         self.runtime = tc.GooseRuntime(exe, tc.REPO_ROOT / "build" / "gen" / "runtime")
 
     # --- output -----------------------------------------------------------
+
+    def selected(self, name):
+        """Whether --filter selects `name`, a fixture's or a check's."""
+        return selects(self.only, name)
 
     def say(self, text):
         """A line of the current piece of work's output, or straight to stdout
@@ -419,6 +501,7 @@ class Runner:
         the Out's value."""
         def run():
             out = Out()
+            out.name = check_name(fn, args)
             with self.into(out):
                 out.value = fn(*args)
             return out
@@ -435,6 +518,10 @@ class Runner:
                                     else source)
 
     def show_task(self, fn, *args):
+        """Starts fn(*args) and adds its slot, unless --filter leaves the
+        check out."""
+        if not self.selected(check_name(fn, args)):
+            return None
         future = self.task(fn, *args)
         self.show(future)
         return future
@@ -445,6 +532,7 @@ class Runner:
         summaries over the results of earlier pieces."""
         def run():
             out = Out()
+            out.name = check_name(fn, args)
             with self.into(out):
                 fn(*args)
             return out
@@ -455,6 +543,8 @@ class Runner:
         it is done, a section at a time (Section), and adds up their
         failures."""
         for title, slots in self.sections:
+            if title and not slots and self.only:
+                continue
             section = Section(title, self.verbose, self.github) if title else None
             for slot in slots:
                 try:
@@ -473,6 +563,7 @@ class Runner:
             if section:
                 section.close()
                 self.failed += [(title, line) for line in section.fails]
+                self.reruns += [n for n in section.reruns if n not in self.reruns]
         self.sections = [(None, [])]
 
     def finish(self):
@@ -488,6 +579,11 @@ class Runner:
                 print("::error::" + f"{title}: {line}".replace("%", "%25"))
             else:
                 print(f"{title}: {line}")
+        if self.reruns:
+            print("to run one of them again alone:")
+            for name in self.reruns:
+                argv = self.rerun_argv + ["--filter", name]
+                print("  " + " ".join(f'"{a}"' if " " in a else a for a in argv))
         return 1
 
     # --- running the compiler and what it built ---------------------------
@@ -1357,6 +1453,13 @@ def main():
                          "many programs one executable holds (default: by the number of "
                          "files and jobs); 1 gives each a process and an executable of "
                          "its own")
+    ap.add_argument("--filter", action="append", default=[], metavar="PATTERN",
+                    help="run only the fixtures whose path under test/ contains PATTERN "
+                         "or matches it as a glob, and the other checks whose name does "
+                         "(ignoring case); repeat it for more")
+    ap.add_argument("--list", action="store_true",
+                    help="print the fixture files that would run (those --filter selects) "
+                         "and stop")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="print a line for every check that passed, not only each "
                          "section's count of them")
@@ -1369,6 +1472,11 @@ def main():
         ap.error("the sanitize profile requires Linux and Clang")
     if args.jobs < 1 or args.gpu_jobs < 0 or args.batch < 0:
         ap.error("--jobs must be at least 1, and --gpu-jobs and --batch at least 0")
+    if args.list:
+        files = sorted(set(f for kind in fixture_files() for f in kind))
+        chosen = [fixture_name(f) for f in files if selects(args.filter, fixture_name(f))]
+        print("\n".join(chosen + [f"{len(chosen)} fixture file(s)"]))
+        return 0
 
     tc.setup_console()
     # The compiler's cache (runtime objects, fetched packages) for everything
@@ -1392,10 +1500,19 @@ def main():
     r = Runner(exe, args.jobs, args.verbose)
     r.gpulock = threading.BoundedSemaphore(args.gpu_jobs) if args.gpu_jobs else None
     r.batch = args.batch
+    r.only = args.filter
+    # A rerun keeps what decides how the suite runs, and leaves out what
+    # only decides how fast.
+    r.rerun_argv = [Path(sys.executable).name, "test/run_tests.py", "--exe", str(exe),
+                    "--profile", args.profile]
+    r.rerun_argv += ["--cc", args.cc] if args.cc else []
+    r.rerun_argv += [flag for flag, on in (("--nocgen", args.nocgen), ("--no-jit", args.no_jit))
+                     if on]
 
     # The bootstrap is the longest chain of work in the suite, so it starts
     # first, and the samples' runner, a process of its own, next.
-    show_goose_in_goose = r.goose_in_goose(cc, args.profile, extra, jit)
+    show_goose_in_goose = (r.goose_in_goose(cc, args.profile, extra, jit)
+                           if args.goose_in_goose_only or r.selected("goose_in_goose") else None)
     if args.goose_in_goose_only:
         show_goose_in_goose()
         r.flush()
@@ -1428,7 +1545,7 @@ def main():
             r.local.out.failures += max(1, sum(line.startswith("FAIL ") for line in lines))
     # On a thread of its own rather than one of the pool's, which it would
     # keep waiting the whole time.
-    samples_future = r.task(samples, alone=True)
+    samples_future = r.task(samples, alone=True) if r.selected("samples") else None
 
     clang = None if args.nocgen or args.profile == "sanitize" else tc.find_clang_c()
     if args.require_clang and not clang:
@@ -1470,20 +1587,15 @@ def main():
         else:
             r.say("\n".join(lines) if lines else "the checker printed nothing")
             r.local.out.failures += max(1, sum(line.startswith("FAIL ") for line in lines))
-    doc_examples_future = r.task(doc_examples, alone=True)
+    doc_examples_future = (r.task(doc_examples, alone=True)
+                           if r.selected("doc_examples reference.md") else None)
 
-    # One level of category directories; nested syntax helpers and the modules
-    # of the goose_in_goose bootstrap are exercised through their entry points.
-    # The lsp/ fixtures are the language server's, driven by lsp_protocol.py.
-    tests = [f for f in sorted(HERE.glob("*/*.goose"))
-             if f.parent.name not in ("errors", "errors_tc", "goose_in_goose", "lsp") and
-             f.name != "lexer_tokens.goose"]
-    if len({f.stem for f in tests}) != len(tests):
+    tests, native_errors, parse_errors, tc_errors, recovery = fixture_files()
+    if len({f.stem for f in tests + native_errors}) != len(tests + native_errors):
         ap.error("fixture names must be unique across categories (shared expected/ and build outputs)")
-    # A native module's (audio, gfx, physics or ui) fixture with error markers
-    # is a rejection test, kept beside what it rejects (for gfx, shaders).
-    native_errors = [f for f in tests if f.parent.name in native and error_markers(f)]
-    tests = [f for f in tests if f not in native_errors]
+    tests, parse_errors, tc_errors, recovery = (
+        [f for f in kind if r.selected(fixture_name(f))]
+        for kind in (tests, parse_errors, tc_errors, recovery))
 
     # The generated programs below take long to check; they start before the
     # fixtures. Their files are written here, before any job reads them.
@@ -1570,8 +1682,10 @@ def main():
         else:
             r.ok(f"cgen+run -O{ol} {f.name}")
 
-    deep = [r.task(call_chain_checks), r.task(call_chain_too_deep)]
-    deep += [r.task(guard_runs_level, ol) for ol in (r.levels if cc else ())]
+    deep = [r.task(fn) for fn in (call_chain_checks, call_chain_too_deep)
+            if r.selected(fn.__name__)]
+    deep += [r.task(guard_runs_level, ol) for ol in (r.levels if cc else ())
+             if r.selected("guard_runs_level")]
 
     # The fixtures' parse, roundtrip and typecheck runs, in batches by their
     # flags, start before the rest of each fixture, which waits for them.
@@ -2502,7 +2616,8 @@ def main():
     if cc:
         r.show_task(native_builder)
 
-    show_goose_in_goose()
+    if show_goose_in_goose:
+        show_goose_in_goose()
 
     # --- JIT: the same programs, compiled and run inside the compiler --------
     # No C file, no external toolchain: what this checks is that the generated
@@ -2524,7 +2639,6 @@ def main():
                       + ", ".join(sorted(set(skipped))))
         r.show_later(jit_skips)
 
-    parse_errors = sorted((HERE / "errors").glob("*.goose"))
     parse_runs = r.goose_each(["--parse"], parse_errors)
 
     def parse_error(f):
@@ -2537,7 +2651,6 @@ def main():
 
     # Typecheck error tests: must parse, must fail the typechecker. One
     # compiler run tells the two apart by whether it reported the parse done.
-    tc_errors = sorted((HERE / "errors_tc").glob("*.goose")) + native_errors
     tc_runs = r.goose_each(["--check"], tc_errors)
 
     def tc_error(f):
@@ -2554,7 +2667,6 @@ def main():
     # checker go on past (docs/design/language_server.md §5 D), reported in
     # the order found, in text and as JSON. Each `// error:` marker is part
     # of the message of the error in its position, and there are no others.
-    recovery = sorted((HERE / "errors_tc" / "recovery").glob("*.goose"))
     recovery_runs = r.goose_each(["--check"], recovery)
 
     def recovery_error(f):
@@ -2591,10 +2703,12 @@ def main():
         r.show(future)
 
     r.section("language reference examples (docs/reference.md)")
-    r.show(doc_examples_future)
+    if doc_examples_future:
+        r.show(doc_examples_future)
 
     r.section("samples")
-    r.show(samples_future)
+    if samples_future:
+        r.show(samples_future)
 
     r.flush()
     if r.pool:

@@ -32,6 +32,28 @@ longest job, and the whole suite takes about as long as that chain.
 `--gpu-jobs N` limits concurrent gfx programs within each runner for GPU drivers
 that cannot handle many headless devices. There is no limit by default.
 
+### Running part of the suite
+
+`--filter PATTERN` runs only the fixtures whose path under `test/` the pattern
+selects, and the suite's other checks whose name it selects (`lsp_protocol`,
+`driver_verbs`, `samples`, `goose_in_goose`, `doc_examples`, ...). A pattern
+selects a name it is part of, or one it matches as a glob (`*`, `?`, `[`),
+ignoring case, and the option may be repeated:
+
+```
+python test/run_tests.py --filter stdlib_regex
+python test/run_tests.py --filter "errors_tc/*" --filter lsp_protocol
+```
+
+A check the filter does not select is not started, and a section with
+nothing left in it is left out of the log, so one fixture takes seconds
+rather than the length of the bootstrap. `--list` prints the fixture files
+that would run, with `--filter` the ones it selects, and runs nothing.
+
+After the repeated FAIL lines, the summary gives one command per failing
+fixture or check that runs it again alone, with the same `--exe`,
+`--profile`, `--cc`, `--nocgen` and `--no-jit`.
+
 The log is divided into sections (parse, roundtrip and typecheck; generated
 C; JIT runs; `errors_tc/`; samples; ...). Each section ends with a line
 counting its checks, such as `== typecheck errors (...): 1668 ok`. Anything
