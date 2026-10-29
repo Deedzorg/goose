@@ -62,6 +62,16 @@ def _check_case(exe, compiler, base, debug):
     require(dry.returncode == 0 and "goose_runtime" in dry.stdout + dry.stderr,
             dry.stdout + dry.stderr)
     require(not (home / "build/runtime").exists(), "dry run changed the runtime cache")
+    # An optimized build asks for the hardening flags, unless --no-harden; a
+    # debug build keeps its own. A gcc-style compiler on Windows gets none.
+    msvc = compiler.stem == "clang-cl"
+    if msvc or os.name != "nt":
+        mark = "/guard:cf" if msvc else "-fstack-protector-strong"
+        plain = run("plain", ["--dry-run", "--no-harden"])
+        require(plain.returncode == 0, plain.stdout + plain.stderr)
+        hardened, unhardened = dry.stdout + dry.stderr, plain.stdout + plain.stderr
+        require((mark in hardened) != debug and mark not in unhardened,
+                f"hardening flag {mark}: {hardened}\n--no-harden: {unhardened}")
 
     (base / "fail").touch()
     failed = run("failed")

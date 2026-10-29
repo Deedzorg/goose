@@ -47,13 +47,14 @@ struct NativeBuild {
 
 // Where the package `pkg`'s native part is built by `b`: under the
 // program's build directory for the program itself, a --debug build apart,
-// and under GOOSE_HOME/build/pkg for a package, by its checkout or its path.
+// and under GOOSE_HOME/build/pkg for a package, by its checkout or its path;
+// a --no-harden build apart from both.
 inline string NativeBuildDir(const Ast &ast, int pkg, const string &rootfile, const Builder &b) {
     auto &p = ast.packages[pkg];
-    if (pkg == 0)
-        return cat(ProgramBuildDir(rootfile), "/native/", b.tc.id, b.opts.debug ? "-debug" : "");
-    if (!p.cachekey.empty()) return cat(GooseHome(), "/build/pkg/", p.cachekey, "/", b.tc.id);
-    return cat(GooseHome(), "/build/pkg/local/", Hex8(p.root), "/", b.tc.id);
+    auto config = b.opts.debug ? "-debug" : b.opts.noharden ? "-noharden" : "";
+    if (pkg == 0) return cat(ProgramBuildDir(rootfile), "/native/", b.tc.id, config);
+    if (!p.cachekey.empty()) return cat(GooseHome(), "/build/pkg/", p.cachekey, "/", b.tc.id, config);
+    return cat(GooseHome(), "/build/pkg/local/", Hex8(p.root), "/", b.tc.id, config);
 }
 
 // The C symbols a file's extern fns name: `extern fn f(...) = "sym"` (or the
@@ -479,10 +480,13 @@ inline bool BuildNativePart(const Ast &ast, int pkg, const string &rootfile,
     auto externs = PackageExternNames(ast, pkg);
     string externtext;
     for (auto &n : externs) Append(externtext, n, "\n");
-    // The stamp: what the build was made from, then whether it holds the
-    // JIT library besides everything an AOT build has.
+    // The stamp: what the build was made from, its compile flags included,
+    // so a build from before the hardening flags is made again; then
+    // whether it holds the JIT library besides everything an AOT build has.
+    string cflags;
+    for (auto &f : b.CFlags()) Append(cflags, f, "\n");
     auto made = cat(b.tc.id, "\n", FilesHash(inputs), "\n", Hex8(sidecartext), "\n",
-                    Hex8(externtext), "\n", Hex8(GooseHeader()), "\n");
+                    Hex8(externtext), "\n", Hex8(GooseHeader()), "\n", Hex8(cflags), "\n");
     auto aotstamp = cat(made, "aot\n"), jitstamp = cat(made, "jit\n");
     auto stampfile = cat(dir, "/stamp");
     // Whether the build there serves this one. A CMake package from a path

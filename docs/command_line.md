@@ -157,6 +157,7 @@ beyond those in [§5](#5-options-for-run-build-and-check):
 | `--debug` | Turn on the overflow, range and tag checks (`GS_DEBUG=1`), and build the C without optimization and with debug information (`/Od /Zi`, or `-O0 -g`), for a debugger. |
 | `--cc name\|path` | The C compiler, as above. |
 | `--standalone` | Compile the runtime into the program, rather than linking the runtime object built once per C compiler. |
+| `--no-harden` | Leave out the hardening flags below, to measure what they cost. |
 | `-v` | Print each command the build runs, and what it prints. |
 | `--dry-run` | Print the commands the build would run, with their paths, and run none of them. A Makefile or CMake project can take them from here. |
 
@@ -166,6 +167,31 @@ root file. The runtime object is compiled the first time a C compiler is
 used, once per compiler and per release or debug configuration, into
 `build/runtime/`. When a compile or link fails, the error shows the command
 and what it printed, and says where the log is.
+
+### Hardened builds
+
+An optimized build also asks the C compiler for its hardening flags. Goose
+code needs none of them: its checks are made before any C exists. They
+guard the runtime and the C a program calls through `extern fn`, where a
+bug in C could otherwise be turned into running an attacker's code.
+
+| C compiler | Compile | Link |
+|---|---|---|
+| MSVC, clang-cl | `/guard:cf` (Control Flow Guard) | `/link /guard:cf /CETCOMPAT` (x64 and x86: the CET shadow stack) |
+| gcc, clang (Linux and other ELF systems) | `-fstack-protector-strong -D_FORTIFY_SOURCE=3` (`=2` before gcc 12 and clang 16), `-fPIE`, `-fcf-protection` (x86) | `-pie -Wl,-z,relro,-z,now` |
+| clang on macOS | `-fstack-protector-strong -D_FORTIFY_SOURCE=2` | nothing more: macOS links PIE already |
+
+MSVC already gives stack cookies, ASLR and DEP without asking, and some
+Linux distributions' compilers turn several of these on by default; the
+flags make sure of them whatever the compiler's defaults. A gcc-style
+compiler on Windows (MinGW) gets none, since its stack protector needs a
+library of its own. `--debug` builds keep their flags as they were, and
+`--no-harden` builds a program without them, its objects kept apart from
+the hardened ones. A package's own C is compiled with them too, except a
+CMake part and the packages built into the compiler (`gfx`, `ui`,
+`physics`, `audio`), which keep the flags they were built with. Measured
+on the showcase speed tests (MSVC and clang-cl, x64), the hardened build
+was as fast as the one without, within the noise between runs.
 
 ## 4. Checking a program
 

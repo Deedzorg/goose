@@ -108,7 +108,8 @@ which nothing in the executable sets.
   under `GOOSE_HOME`, and compiles and links it into an executable beside
   the source (`build.h`: the runtime object compiled once per toolchain and
   configuration, the native modules' response files, `-o`, `--debug`,
-  `--standalone`, `-v`, `--dry-run`; `-O2` by default).
+  `--standalone`, `--no-harden`, `-v`, `--dry-run`; `-O2` by default, with
+  the C compiler's hardening flags unless `--debug` or `--no-harden`).
 * `goose check file.goose` typechecks it (`--check`).
 * `goose fetch file.goose` fetches the packages the root declares and stops
   (`--parse`; `--update` fetches tags and branches again).

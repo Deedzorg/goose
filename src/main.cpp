@@ -749,6 +749,10 @@ R"(  --cc name|path        The C compiler: msvc, clang-cl, clang, gcc, cc or a
                         path (or GOOSE_CC; by default the first one found).
   --standalone          Compile the runtime into the program rather than link
                         the runtime object built once per C compiler.
+  --no-harden           Leave out the hardening flags an optimized build gets
+                        (Control Flow Guard; stack protector, checked libc
+                        calls, PIE and read-only relocations on Linux), which
+                        guard the runtime and the C called through extern fn.
   -v                    Print each command the build runs and what it prints.
   --dry-run             Print the commands the build would run, and run none.
 )");
@@ -1334,7 +1338,7 @@ int Main(int argc, char **argv) {
     auto nobce = false, bcetest = false, bcelines = false, norfcheck = false;
     auto stacks = false;
     auto stats = false;
-    auto forcejit = false, standalone = false;
+    auto forcejit = false, standalone = false, noharden = false;
     auto json = false, refresh = false, debug = false, verbose = false, dryrun = false;
     auto jsondiag = false;
     string ccrequest;
@@ -1384,6 +1388,7 @@ int Main(int argc, char **argv) {
         else if (arg == "--unsafe-no-rf-check") norfcheck = true;
         else if (arg == "--jit") forcejit = true;
         else if (arg == "--standalone") standalone = true;
+        else if (arg == "--no-harden") noharden = true;
         else if (arg == "--multi-test") multitest = true;
         else if (arg == "--gen-runtime-header") {
             try {
@@ -1501,8 +1506,12 @@ int Main(int argc, char **argv) {
                             "(-o out.c) writes the C for a C host\n");
             return 1;
         }
-        buildopts = BuildOptions { debug, verbose, dryrun, standalone, outname };
+        buildopts = BuildOptions { debug, verbose, dryrun, standalone, outname, noharden };
         outname.clear();
+    } else if (noharden) {
+        fprintf(stderr, "--no-harden is for goose build: it leaves the C compiler's hardening "
+                        "flags off\n");
+        return 1;
     }
     if (files.size() > 1 && !multitest) {
         fprintf(stderr, "multiple input files given\n");

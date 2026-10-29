@@ -18,6 +18,12 @@ struct BuildOptions {
     bool dryrun = false;      // --dry-run: print the commands and run nothing
     bool standalone = false;  // --standalone: no runtime object
     string exe;               // -o: the executable; "" puts it beside the root source
+    bool noharden = false;    // --no-harden: none of Builder's hardening flags
+
+    // Whether the C is built with the hardening flags: an optimized build,
+    // unless --no-harden. A --debug build is for a debugger, and keeps its
+    // flags as they were.
+    bool Harden() const { return !debug && !noharden; }
 };
 
 inline string AbsolutePath(const string &path) {
@@ -44,16 +50,77 @@ struct Builder {
     FILE *msgs;
 
     // The compile flags of both styles: optimization, or debug information
-    // and none of it. Defines go into the C itself (main.cpp), never here.
+    // and none of it, then the hardening ones. Defines go into the C itself
+    // (main.cpp), never here.
     vector<string> CFlags() const {
+        vector<string> f;
         if (tc.style == "msvc") {
-            vector<string> f = { "/nologo" };
+            f.push_back("/nologo");
             if (opts.debug) f.push_back("/Od"), f.push_back("/Zi");
             else f.push_back("/O2");
-            return f;
+        } else if (opts.debug) {
+            f = { "-O0", "-g" };
+        } else {
+            f = { "-O2" };
         }
-        if (opts.debug) return { "-O0", "-g" };
-        return { "-O2" };
+        for (auto &h : HardenCFlags()) f.push_back(h);
+        return f;
+    }
+
+    // Goose code needs none of these: its checks come before any C. They
+    // guard the runtime and the C a program calls through extern fn
+    // (docs/command_line.md, "Hardened builds"). MSVC already gives stack
+    // cookies, ASLR and DEP by default; Control Flow Guard checks indirect
+    // calls. On ELF the stack protector, checked libc calls and a
+    // position-independent executable, so ASLR moves the program too. A
+    // package's -fPIC, later on its command line, wins over -fPIE. Nothing
+    // for a gcc-style compiler on Windows, where MinGW's stack protector
+    // needs a library of its own.
+    vector<string> HardenCFlags() const {
+        if (!opts.Harden()) return {};
+        if (tc.style == "msvc") return { "/guard:cf" };
+        #ifdef _WIN32
+            return {};
+        #else
+            // Level 3 checks more calls, from gcc 12 and clang 16 with
+            // glibc; some distributions' compilers default to it, and a 2
+            // would lower it. Apple's clang numbers its versions its own way.
+            auto major = atoi(tc.version.c_str());
+            auto fortify3 = (tc.name == "gcc" && major >= 12) || (tc.name == "clang" && major >= 16);
+            #ifdef __APPLE__
+                fortify3 = false;
+            #endif
+            vector<string> f = { "-fstack-protector-strong", "-U_FORTIFY_SOURCE",
+                                 fortify3 ? "-D_FORTIFY_SOURCE=3" : "-D_FORTIFY_SOURCE=2" };
+            #ifndef __APPLE__
+                f.push_back("-fPIE");
+                #if defined(__x86_64__) || defined(__i386__)
+                    f.push_back("-fcf-protection");
+                #endif
+            #endif
+            return f;
+        #endif
+    }
+
+    // What the executable's link adds when hardened: Control Flow Guard's
+    // tables and the CET shadow stack mark on Windows (cl passes what
+    // follows /link to the linker, so these go last), a PIE whose
+    // relocations are made read-only before main on ELF. macOS links PIE
+    // already, and its linker has no -z.
+    vector<string> HardenLinkFlags() const {
+        if (!opts.Harden()) return {};
+        if (tc.style == "msvc") {
+            #if defined(_M_X64) || defined(_M_IX86)
+                return { "/link", "/guard:cf", "/CETCOMPAT" };
+            #else
+                return { "/link", "/guard:cf" };
+            #endif
+        }
+        #if defined(_WIN32) || defined(__APPLE__)
+            return {};
+        #else
+            return { "-pie", "-Wl,-z,relro,-z,now" };
+        #endif
     }
 
     // The system libraries a program links beyond the C library, in the cc
@@ -167,17 +234,19 @@ struct Builder {
             for (auto &r : rsps) argv.push_back(cat("@", r));
             for (auto &l : SystemLibs()) argv.push_back(l);
         }
+        for (auto &f : HardenLinkFlags()) argv.push_back(f);
         return Run(argv, cat("building ", exe), logfile);
     }
 };
 
 // The runtime object for this toolchain and configuration, compiled from
 // `goose --emit-runtime`'s C on first use: GOOSE_HOME/build/runtime/<runtime
-// hash>/<toolchain id>-<config>/goose_runtime.o. "" when it could not be
-// built, after the builder said why.
+// hash>/<toolchain id>-<config>/goose_runtime.o, the config being debug,
+// hardened, or release for --no-harden (what an optimized build was before
+// hardening). "" when it could not be built, after the builder said why.
 inline string RuntimeObject(const Builder &b) {
     auto dir = cat(GooseHome(), "/build/runtime/", RuntimeVersion(), "/", b.tc.id, "-",
-                   b.opts.debug ? "debug" : "release");
+                   b.opts.debug ? "debug" : b.opts.Harden() ? "hardened" : "release");
     auto obj = cat(dir, "/goose_runtime.", b.tc.style == "msvc" ? "obj" : "o");
     if (PathExists(obj) && !b.opts.dryrun) return obj;
     auto src = cat(dir, "/goose_runtime.c");
