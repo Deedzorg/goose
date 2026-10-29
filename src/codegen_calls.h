@@ -594,6 +594,8 @@ inline vector<string> CodeGen::EmitDispatch(Call *c, Dst d0, vector<Dst> *alldst
                 p = GenPtr(sn);
             }
             tag = cat("*(", IntCT(TagStore(ei->en)), " *)", p);
+            // Before the size below, which the tag decides.
+            EmitTagCheck(ei, tag, c->line);
             // A reference input can also decay to a by-value case parameter.
             // Copy its value now; reference cases retain the original pointer.
             // Only a variable-size variant needs the whole value on a data
@@ -628,6 +630,7 @@ inline vector<string> CodeGen::EmitDispatch(Call *c, Dst d0, vector<Dst> *alldst
             sv = T();
             FixedLocal(enumtype, sv, value);
             tag = cat(sv, ".tag");
+            EmitTagCheck(ei, tag, c->line);
         }
     };
     // Evaluate every argument in source order, including the dispatched

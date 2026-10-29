@@ -696,6 +696,17 @@ inline string CodeGen::TagConst(EnumInst *ei, int vi) {
     return cat(tagprefix[ei], "_", Sanitize(ei->en->variants[vi].name), "_k");
 }
 
+// Safe Goose never makes a tag outside 0..n-1, and from_bytes checks the
+// ones it loads, so only C writing over Goose memory can (GS_BADTAG). The
+// test goes before the switch, whose default stays an optimizer hint: in
+// the default, clang-cl measured a 55% slower dispatch loop (a bytecode
+// interpreter's), and here none, with MSVC none either way. `tag` is read
+// twice, which every caller's is free to be.
+inline void CodeGen::EmitTagCheck(EnumInst *ei, const string &tag, Line line) {
+    L("if (GS_UNLIKELY((uint64_t)(", tag, ") >= ", ei->en->variants.size(), "u)) GS_BADTAG(",
+      LocArgs(line), ");");
+}
+
 inline TypeExpr *CodeGen::VariantType(TypeExpr *enumtype, int vi) {
     auto ei = EIOf(enumtype);
     auto key = pair<EnumInst *, int>(ei, vi);

@@ -508,8 +508,8 @@ build/goose build samples/01_tour.goose && samples/01_tour
 build/goose build samples/27_gfx_cube.goose && samples/27_gfx_cube
 ```
 
-`goose check` only typechecks. `--debug` turns on the overflow, range and
-tag checks, each of which names its source line when it fails, and
+`goose check` only typechecks. `--debug` turns on the overflow and range
+checks, each of which names its source line when it fails, and
 `--bce-lines` reports the bounds checks that remain on each line. Every
 resizable value lives on a data stack of 2 GB of reserved address space,
 committed as it is used, and `--stack-reserve 16G` changes that size.

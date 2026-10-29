@@ -105,7 +105,7 @@ typedef double gs_f64 GS_ALIGN1;
 #define GS_NEED_THREADS 0
 #endif
 #ifndef GS_DEBUG
-#define GS_DEBUG 0          /* 1: overflow, `as` range, and tag checks (§9.3). */
+#define GS_DEBUG 0          /* 1: overflow and `as` range checks (§9.3). */
 #endif
 
 /* Configuration; all overridable from the compile command line. */
@@ -197,7 +197,7 @@ enum {
     GS_E_POP,          /* pop on empty array */
     GS_E_THREADID,     /* thread_wait on an unknown thread id */
     GS_E_THREADSELF,   /* a worker cannot wait for itself */
-    GS_E_TAG,          /* corrupt ADT tag (debug builds only) */
+    GS_E_TAG,          /* corrupt ADT tag */
     GS_E_ENDIAN,       /* serialization on a big-endian host */
     GS_E_SLICELEN,     /* slice pool length negative or beyond any data stack */
     GS_E_POOLSLICE,    /* a slice handed to a slice pool is not one of its runs */
@@ -237,8 +237,24 @@ GS_API GS_NORETURN void gs_asfail_f(const char *why, double d, int f32, const ch
     ((uint64_t)(i) < (uint64_t)(n) ? (i) \
                                    : (gs_idxfail((int64_t)(i), (n), (f), (l)), (int64_t)0))
 
-/* Statically unreachable spots (e.g. an ADT tag no variant matches): checked
-   in debug builds, an optimizer hint in release. */
+/* An ADT tag no variant matches, as a match or a call by variant reads it:
+   checked in every build, by one compare before the switch (EmitTagCheck).
+   Safe Goose never makes one, and from_bytes checks the tags it loads, so
+   only C writing over Goose memory can, and an optimizer hint alone would
+   turn that C bug into a jump anywhere. */
+#define GS_BADTAG(f, l) gs_abort(GS_E_TAG, (f), (l))
+
+/* A test that is almost never true, for the compilers that take the hint:
+   clang lays a dispatch loop out better for it (EmitTagCheck). */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
+#define GS_UNLIKELY(c) __builtin_expect(!!(c), 0)
+#else
+#define GS_UNLIKELY(c) (c)
+#endif
+
+/* Statically unreachable spots (a switch's default after its tag check, the
+   end of a function that always returns): checked in debug builds, an
+   optimizer hint in release. */
 #if GS_DEBUG
 #define GS_UNREACHABLE(f, l) gs_abort(GS_E_TAG, (f), (l))
 #elif defined(_MSC_VER)

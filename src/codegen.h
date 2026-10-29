@@ -372,6 +372,8 @@ struct CodeGen {
 
     void EnsureTagEnum(EnumInst *ei);
     string TagConst(EnumInst *ei, int vi);
+    // A tag no variant has aborts, in every build, before a switch on it.
+    void EmitTagCheck(EnumInst *ei, const string &tag, Line line);
 
     // The TY_VARIANT type for (enum type, variant index); cached per pair.
     map<pair<EnumInst *, int>, TypeExpr *> varianttypes;

@@ -668,8 +668,8 @@ R"(  --stats               Print what the compile did: the declarations parsed,
 )";
 
 constexpr const char *DEBUGOPTION =
-R"(  --debug               Overflow, range and tag checks that name the source
-                        line they fail on.
+R"(  --debug               Overflow and range checks that name the source line
+                        they fail on.
 )";
 
 // The help on a command or topic, `goose help` or `goose --help`'s for ""
@@ -695,8 +695,8 @@ Commands:
 
 Common options:
   -O0, -O1, -O2   Inlining level (default -O2).
-  --debug         Overflow, range and tag checks that name the source line
-                  they fail on.
+  --debug         Overflow and range checks that name the source line they
+                  fail on.
   --stats         Print what the compile did (declarations, bounds checks
                   removed, files written).
   --color when    Color errors and warnings: auto (on a terminal, unless
@@ -742,8 +742,8 @@ Options:
   -o exe                Where the executable goes.
   -O0, -O1, -O2         Inlining level (default -O2). The C compiler
                         optimizes at every level, unless --debug.
-  --debug               Overflow, range and tag checks that name the source
-                        line they fail on, and the C built for a debugger.
+  --debug               Overflow and range checks that name the source line
+                        they fail on, and the C built for a debugger.
 )", COMPILEOPTIONS,
 R"(  --cc name|path        The C compiler: msvc, clang-cl, clang, gcc, cc or a
                         path (or GOOSE_CC; by default the first one found).

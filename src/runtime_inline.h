@@ -117,7 +117,7 @@ typedef double gs_f64 GS_ALIGN1;
 #define GS_NEED_THREADS 0
 #endif
 #ifndef GS_DEBUG
-#define GS_DEBUG 0          /* 1: overflow, `as` range, and tag checks (§9.3). */
+#define GS_DEBUG 0          /* 1: overflow and `as` range checks (§9.3). */
 #endif
 
 /* Configuration; all overridable from the compile command line. */
@@ -210,7 +210,7 @@ enum {
 )GSRT"
 R"GSRT(    GS_E_THREADID,     /* thread_wait on an unknown thread id */
     GS_E_THREADSELF,   /* a worker cannot wait for itself */
-    GS_E_TAG,          /* corrupt ADT tag (debug builds only) */
+    GS_E_TAG,          /* corrupt ADT tag */
     GS_E_ENDIAN,       /* serialization on a big-endian host */
     GS_E_SLICELEN,     /* slice pool length negative or beyond any data stack */
     GS_E_POOLSLICE,    /* a slice handed to a slice pool is not one of its runs */
@@ -250,8 +250,24 @@ GS_API GS_NORETURN void gs_asfail_f(const char *why, double d, int f32, const ch
     ((uint64_t)(i) < (uint64_t)(n) ? (i) \
                                    : (gs_idxfail((int64_t)(i), (n), (f), (l)), (int64_t)0))
 
-/* Statically unreachable spots (e.g. an ADT tag no variant matches): checked
-   in debug builds, an optimizer hint in release. */
+/* An ADT tag no variant matches, as a match or a call by variant reads it:
+   checked in every build, by one compare before the switch (EmitTagCheck).
+   Safe Goose never makes one, and from_bytes checks the tags it loads, so
+   only C writing over Goose memory can, and an optimizer hint alone would
+   turn that C bug into a jump anywhere. */
+#define GS_BADTAG(f, l) gs_abort(GS_E_TAG, (f), (l))
+
+/* A test that is almost never true, for the compilers that take the hint:
+   clang lays a dispatch loop out better for it (EmitTagCheck). */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
+#define GS_UNLIKELY(c) __builtin_expect(!!(c), 0)
+#else
+#define GS_UNLIKELY(c) (c)
+#endif
+
+/* Statically unreachable spots (a switch's default after its tag check, the
+   end of a function that always returns): checked in debug builds, an
+   optimizer hint in release. */
 #if GS_DEBUG
 #define GS_UNREACHABLE(f, l) gs_abort(GS_E_TAG, (f), (l))
 #elif defined(_MSC_VER)
@@ -346,7 +362,8 @@ static inline int gs_simd_detect(void) {
     if (!(r[2] & (1u << 5))) return 0;                  /* LZCNT. */
     if (GS_SIMD < 2 || (xcr0 & 0xe0) != 0xe0) return 1; /* Opmask and ZMM state. */
     /* AVX512F, DQ, CD, BW, VL. */
-    if ((b7 & (1u << 16 | 1u << 17 | 1u << 28 | 1u << 30 | 1u << 31)) !=
+)GSRT"
+R"GSRT(    if ((b7 & (1u << 16 | 1u << 17 | 1u << 28 | 1u << 30 | 1u << 31)) !=
         (1u << 16 | 1u << 17 | 1u << 28 | 1u << 30 | 1u << 31))
         return 1;
     return 2;
@@ -367,8 +384,7 @@ static inline int gs_simd_level(void) {
 
 /* math's mul_add (runtime_ext.h): x * y + z, rounded once where the code
    is built for FMA and twice where it is not, so its results are the
-)GSRT"
-R"GSRT(   implementation's (§7.12). GS_MUL_ADD_BASE says which for code built for
+   implementation's (§7.12). GS_MUL_ADD_BASE says which for code built for
    the target as a whole: fused on arm64 and on x86-64 built for AVX2 or
    past it (-march=x86-64-v3, clang-cl's /arch:AVX2), separate everywhere
    else, under TinyCC and under MSVC. MSVC compiles fma() to a call into the
@@ -511,7 +527,8 @@ static int gs_memeq(const void *a, const void *b, size_t n) {
    Integer semantics (§6.2): every operation runs at its operands' type. The
    operations compute wide (so wrap is defined in C), truncate back, and — when
    the generated C is compiled with -DGS_DEBUG=1 — abort when the wide result
-   does not fit the type. Shifts mask their count to the width; division is
+)GSRT"
+R"GSRT(   does not fit the type. Shifts mask their count to the width; division is
    zero-checked always.
 
    In a release build every operation is a macro whose body is the
@@ -525,8 +542,7 @@ static int gs_memeq(const void *a, const void *b, size_t n) {
    operation, for the debug build's overflow message; the release macros
    drop them unevaluated. */
 
-)GSRT"
-R"GSRT(/* Division and modulo, both builds: the zero check is not optional, `%` is
+/* Division and modulo, both builds: the zero check is not optional, `%` is
    Euclidean, and i64.min / -1 aborts. They are macros for the reason the
    other operations are, but each names its operands more than once, so the
    compiler passes side-effect-free ones (as GS_IDX's index); a signed
@@ -675,7 +691,8 @@ static uint64_t gs_shr_u64(uint64_t a, int64_t n) { return a >> (n & 63); }
 #define gs_add_i16(a, b, f, l) ((int16_t)((int64_t)(a) + (int64_t)(b)))
 #define gs_sub_i16(a, b, f, l) ((int16_t)((int64_t)(a) - (int64_t)(b)))
 #define gs_mul_i16(a, b, f, l) ((int16_t)((int64_t)(a) * (int64_t)(b)))
-#define gs_neg_i16(a, f, l)    ((int16_t)(-(int64_t)(a)))
+)GSRT"
+R"GSRT(#define gs_neg_i16(a, f, l)    ((int16_t)(-(int64_t)(a)))
 #define gs_shl_i16(a, n) ((int16_t)((uint64_t)(a) << ((n) & 15)))
 #define gs_shr_i16(a, n) ((int16_t)((int64_t)(a) >> ((n) & 15)))
 
@@ -687,8 +704,7 @@ static uint64_t gs_shr_u64(uint64_t a, int64_t n) { return a >> (n & 63); }
 #define gs_shr_i32(a, n) ((int32_t)((int64_t)(a) >> ((n) & 31)))
 
 #define gs_add_u8(a, b)  ((uint8_t)((a) + (b)))
-)GSRT"
-R"GSRT(#define gs_sub_u8(a, b)  ((uint8_t)((a) - (b)))
+#define gs_sub_u8(a, b)  ((uint8_t)((a) - (b)))
 #define gs_mul_u8(a, b)  ((uint8_t)((uint64_t)(a) * (uint64_t)(b)))
 #define gs_shl_u8(a, n)  ((uint8_t)((uint64_t)(a) << ((n) & 7)))
 #define gs_shr_u8(a, n)  ((uint8_t)((uint64_t)(a) >> ((n) & 7)))
@@ -874,7 +890,8 @@ static int64_t gs_f2ichk(double d, int f32, int64_t lo, int64_t hi, const char *
     if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0))
         gs_asfail_f("out of range", d, f32, type, file, line);
     int64_t v = (int64_t)d;
-    if (v < lo || v > hi) gs_asfail_f("out of range", d, f32, type, file, line);
+)GSRT"
+R"GSRT(    if (v < lo || v > hi) gs_asfail_f("out of range", d, f32, type, file, line);
     if ((double)v != d) gs_asfail_f("changes the value", d, f32, type, file, line);
     return v;
 }
@@ -887,8 +904,7 @@ static uint64_t gs_f2uchk(double d, int f32, const char *file, int line) {
 }
 #define GS_RANGE(v, lo, hi, t, f, l) gs_rangechk((v), (lo), (hi), (t), (f), (l))
 #define GS_RANGE_U(v, hi, t, f, l)   gs_rangechk_u((v), (hi), (t), (f), (l))
-)GSRT"
-R"GSRT(#define GS_F2I(d, s, lo, hi, t, f, l) gs_f2ichk((d), (s), (lo), (hi), (t), (f), (l))
+#define GS_F2I(d, s, lo, hi, t, f, l) gs_f2ichk((d), (s), (lo), (hi), (t), (f), (l))
 #define GS_F2U(d, s, f, l)            gs_f2uchk((d), (s), (f), (l))
 
 #else
@@ -1053,7 +1069,8 @@ static void gs_thread_run(void (*entry)(uint8_t *), uint8_t *args) {
     gs_rt_stats();
 }
 
-/* What the thread program holds once it has returned or aborted; the
+)GSRT"
+R"GSRT(/* What the thread program holds once it has returned or aborted; the
    runtime releases the regions after this. */
 static void gs_thread_release(void) {
     free(gs_gl);
@@ -1072,8 +1089,7 @@ static int64_t gs_thread_spawn(void (*entry)(uint8_t *), const void *args, int64
 #endif  /* GS_RUNTIME_OBJECT */
 
 /* ---------------------------------------------------------------------------
-)GSRT"
-R"GSRT(   Slice pools (§5.4, `reusable[]`). A pool's freelist is a tree of its free
+   Slice pools (§5.4, `reusable[]`). A pool's freelist is a tree of its free
    (index, count) spans, kept on a data stack of its own in nodes of
    GS_SPAN_NODE bytes (runtime_impl.h). The emitted code grows the element
    region and fills elements; these only keep the spans, and each takes the

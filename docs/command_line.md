@@ -154,7 +154,7 @@ beyond those in [§5](#5-options-for-run-build-and-check):
 | Option | What it does |
 |---|---|
 | `-o exe` | Where the executable goes. Its directory is made if needed. |
-| `--debug` | Turn on the overflow, range and tag checks (`GS_DEBUG=1`), and build the C without optimization and with debug information (`/Od /Zi`, or `-O0 -g`), for a debugger. |
+| `--debug` | Turn on the overflow and range checks (`GS_DEBUG=1`), and build the C without optimization and with debug information (`/Od /Zi`, or `-O0 -g`), for a debugger. |
 | `--cc name\|path` | The C compiler, as above. |
 | `--standalone` | Compile the runtime into the program, rather than linking the runtime object built once per C compiler. |
 | `-v` | Print each command the build runs, and what it prints. |
@@ -189,7 +189,7 @@ These options have the same meaning for `goose run`, `goose build`,
 | Option | What it does |
 |---|---|
 | `-O0`, `-O1`, `-O2` | How much the Goose compiler inlines: nothing, a little, or the most (the default). Constant folding and propagation run at every level, and a build's C compiler optimizes at every level. |
-| `--debug` | Turn on the overflow checks, the range checks of `as` casts and the tag checks (`GS_DEBUG=1`). Each failure names its source line, and an overflow or a cast names the values involved. A build also gets debug information ([§3](#3-building-an-executable)). |
+| `--debug` | Turn on the overflow checks and the range checks of `as` casts (`GS_DEBUG=1`). Each failure names its source line, and an overflow or a cast names the values involved. A build also gets debug information ([§3](#3-building-an-executable)). An enum value whose tag no variant has, which only C writing over Goose memory can make, aborts in every build. |
 | `-D NAME[=VALUE]` | Define a C macro in the generated program, as `-DNAME[=VALUE]` does too. The define is written into the C itself, so a run and a build see the same source. The value is 1 when none is given. |
 | `--stack-reserve size` | The address space reserved for each data stack, from 64K up to 256T with a `K`, `M`, `G` or `T` suffix. The default is 2G. The address space is committed as it is used, so a large reservation costs nothing until it is used. |
 | `--stacks` | Report how many data stacks the program and each of its workers use, what that adds up to, and the cap it puts on `hardware_threads()`. |
@@ -209,7 +209,7 @@ The `-D` macros that the runtime reads, which configure a program:
 
 | Macro | Default | What it sets |
 |---|---|---|
-| `GS_DEBUG` | 0 | 1 is what `--debug` sets: the overflow, range and tag checks. |
+| `GS_DEBUG` | 0 | 1 is what `--debug` sets: the overflow and range checks. |
 | `GS_STACK_STATS` | 0 | 1 makes each thread program report its data stack use on stderr as it ends. |
 | `GS_STACK_RESERVE` | 2 GB | The address space reserved per data stack, which `--stack-reserve` sets. |
 | `GS_STACK_GAP` | 1 MB | The unmapped gap after each data stack, which makes runaway growth abort. |

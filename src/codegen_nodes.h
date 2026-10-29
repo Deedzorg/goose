@@ -558,6 +558,7 @@ inline void MatchExpr::CgAny(CodeGen &cg, const Dst &d) {
         if (!cg.IsCName(sv)) sv = cg.Snapshot(scrutinee->exprtype, sv);
         tag = cat(sv, ".tag");
     }
+    cg.EmitTagCheck(ei, tag, line);
     cg.L("switch (", tag, ") {");
     auto haswild = false;
     for (auto &arm : arms) {

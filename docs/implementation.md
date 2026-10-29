@@ -209,7 +209,8 @@ their whitespace) and parses both (the same `Ast::Dump` and `DumpDocs`).
 
 The debug build of the *generated* C is `-DGS_DEBUG=1` on the C compiler (or
 `-DGS_DEBUG=1` to `goose`, which writes it into the file): it enables the
-overflow, `as` range and ADT tag checks of §9.3. The Goose compiler's own
+overflow and `as` range checks of §9.3 (an ADT tag no variant has aborts in
+every build: `EmitTagCheck`, before each switch on one). The Goose compiler's own
 build configuration is unrelated.
 
 ---
