@@ -206,6 +206,20 @@ inline const char *CodeGen::IntCT(IntStorage s) {
     }
 }
 
+// IntCT's C type without the one-byte alignment, for a field (FieldCT).
+inline const char *CodeGen::PlainIntCT(IntStorage s) {
+    switch (s) {
+        case IS_I8:  return "int8_t";
+        case IS_I16: return "int16_t";
+        case IS_I32: return "int32_t";
+        case IS_U8:  return "uint8_t";
+        case IS_U16: return "uint16_t";
+        case IS_U32: return "uint32_t";
+        case IS_U64: return "uint64_t";
+        default:     return "int64_t";
+    }
+}
+
 // The runtime arithmetic helper suffix per integer type (runtime.h).
 inline const char *CodeGen::IntSfx(IntStorage s) {
     switch (s) {
@@ -573,13 +587,13 @@ inline string CodeGen::CT(TypeExpr *t) {
         }
         case TY_ARRAY: {
             auto &a = *t->arr;
-            auto e = CT(a.sub);
+            auto e = FieldCT(a.sub);
             if (a.akind == A_FIXED) {
                 auto k = ArrSize(t->arr);
                 Append(d, "typedef struct { ", e, " e[", k ? k : 1, "]; } ", name, ";\n");
             } else {
                 assert(a.akind == A_LIMITED && ArrSize(t->arr) >= 0);
-                Append(d, "typedef struct { ", IntCT(LenStore(t->arr)), " len; ", e, " e[",
+                Append(d, "typedef struct { ", PlainIntCT(LenStore(t->arr)), " len; ", e, " e[",
                        ArrSize(t->arr) ? ArrSize(t->arr) : 1, "]; } ", name, ";\n");
             }
             break;
@@ -606,7 +620,7 @@ inline string CodeGen::CT(TypeExpr *t) {
             assert(!t->enu->varmode);
             auto ei = EIOf(t);
             EnsureTagEnum(ei);
-            Append(d, "struct ", name, " {\n    ", IntCT(TagStore(ei->en)), " tag;\n");
+            Append(d, "struct ", name, " {\n    ", PlainIntCT(TagStore(ei->en)), " tag;\n");
             string members;
             for (size_t vi = 0; vi < ei->en->variants.size(); vi++) {
                 if (EmptyLayout(ei->en->variants[vi].fields)) continue;
@@ -623,6 +637,33 @@ inline string CodeGen::CT(TypeExpr *t) {
     tdecls += d;
     tdecls += "\n";
     return name;
+}
+
+// The C type of a field or an array element. The aggregates are packed
+// (#pragma pack(1)), which places each member at its Goose offset whatever
+// its C type, so a scalar or a pointer is declared with its plain C type
+// rather than CT's one-byte-aligned alias. Clang's x86-64 calling convention
+// reads a by-value struct's fields to pick its registers: an aligned(1)
+// scalar or pointer that crosses an eight-byte boundary counts toward the
+// first eightbyte only, so a 9-byte { u8 tag; i64 v } goes in one register
+// and loses v's last byte. A plain type at an unaligned offset makes the
+// struct go in memory, as gcc passes it too. A reference to such a field is
+// still held, and read, through CT's alias.
+inline string CodeGen::FieldCT(TypeExpr *t) {
+    switch (t->kind) {
+        case TY_INT: return PlainIntCT(t->intstorage);
+        case TY_FLT: return t->fltstorage == FS_F32 ? "float" : "double";
+        case TY_REF: {
+            auto &r = *t->ref;
+            if (r.lenstorage >= 0) return PlainIntCT((IntStorage)r.lenstorage);
+            auto name = CT(t);
+            if (name == "gs_rref") return name;
+            auto sub = IsBytesT(r.sub) ? string("uint8_t") :
+                       StructLike(r.sub) ? NameCT(r.sub) : CT(r.sub);
+            return cat(sub, " *");
+        }
+        default: return CT(t);
+    }
 }
 
 // Fixed-class kinds that C declares as a named struct: they get a
@@ -665,7 +706,7 @@ inline void CodeGen::EmitCFields(string &d, const vector<Field> &fields,
             if (sz > 0) Append(d, "    uint8_t gs_pad", npad++, "[", sz, "];\n");
             continue;
         }
-        Append(d, "    ", CT(ftypes[i]), " ", Sanitize(f.name), ";\n");
+        Append(d, "    ", FieldCT(ftypes[i]), " ", Sanitize(f.name), ";\n");
     }
     for (auto i = n; i < fields.size(); i++) {
         EmitCoreTypes();
