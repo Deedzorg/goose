@@ -913,6 +913,8 @@ GS_API uint8_t *gs_reserve_region(gs_stack *stack);
 /* The calling thread program's stack use, on stderr (GS_STACK_STATS):
    `stacks` is how many of its indexed data stacks exist. */
 GS_API void gs_stack_stats(int64_t stacks);
+/* Names a global's stack, for GOOSE_MEMORY_WATCH (runtime_impl.h). */
+GS_API void gs_watch_name(gs_stack *stack, const char *name);
 /* Releases every region of the calling thread program, and what else the
    runtime keeps for its thread. */
 GS_API void gs_release_regions(void);

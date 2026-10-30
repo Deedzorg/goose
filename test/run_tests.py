@@ -2434,6 +2434,17 @@ def main():
     if cc:
         r.show_task(huge_pages)
 
+    def memory_watch():
+        from memory_watch import check_memory_watch
+        try:
+            check_memory_watch(exe, gendir)
+            r.ok("memory watch: GOOSE_MEMORY_WATCH reports the data stacks, live under goose "
+                 "run, the globals named, the end marked; nothing without it")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("memory watch", str(e))
+    if cc:
+        r.show_task(memory_watch)
+
     def commit_limit():
         from commit_limit import check_commit_limit
         try:

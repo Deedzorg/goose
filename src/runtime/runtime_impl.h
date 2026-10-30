@@ -274,9 +274,11 @@ static void gs_regions_begin(int64_t capacity) {
 
 static void gs_release_region(const gs_region *r);
 static void gs_native_stack_free(void);
+static void gs_watch_stop(const gs_region *regions);
 
 /* Unregister before unmapping, then drop the registry. */
 GS_API void gs_release_regions(void) {
+    gs_watch_stop(gs_regions);
     while (gs_nregions) {
         long i = gs_nregions - 1;
         gs_region r = gs_regions[i];
@@ -1443,6 +1445,192 @@ GS_API int64_t gs_scan_pair(const uint8_t *p, int64_t n, const void *a, int64_t 
     return gs_scan_pair_bytes(p, np, sa, d, sb);
 }
 
+/* ---------------------------------------------------------------------------
+   Watching the data stacks (GOOSE_MEMORY_WATCH). With that environment
+   variable naming a file, a thread of the runtime's own writes the main
+   program's data stacks to it 20 times a second, and once more as the
+   program ends, for a development environment to draw while it runs:
+
+       goose memory 1
+       ms 1250                 since the program started
+       state running           or done
+       regions 3
+       0 4096 65536 69632      region, bytes in use, the most seen in use,
+       1 0 0 0 lines           bytes ever committed (Windows), and the
+       end                     global the stack is for, if one is
+
+   Bytes in use are the stack's top as last stored: a function growing an
+   array in a loop may keep the top in a register until its next call, so
+   the most seen in use can miss a moment's peak. Windows commits pages as
+   a stack first reaches them, so there the bytes ever committed are an
+   exact high-water mark, in whole pages. Workers' stacks are not watched.
+   The file is written beside its name and renamed over it, so a reader
+   never sees half of one. Where the runtime has no threads (a POSIX
+   program without workers, built on its own), nothing is watched. */
+
+#if defined(_WIN32) || GS_NEED_THREADS
+#define GS_WATCH 1
+#ifndef _WIN32
+#include <pthread.h>
+#include <time.h>
+#endif
+#else
+#define GS_WATCH 0
+#endif
+
+#define GS_WATCH_NAMES 256
+static gs_stack *gs_watch_stacks[GS_WATCH_NAMES];
+static const char *gs_watch_labels[GS_WATCH_NAMES];
+static volatile long gs_watch_nnames;
+
+/* Which global a stack is for, as the program sets its globals up. */
+GS_API void gs_watch_name(gs_stack *stack, const char *name) {
+    long n = gs_watch_nnames;
+    if (n >= GS_WATCH_NAMES) return;
+    gs_watch_stacks[n] = stack;
+    gs_watch_labels[n] = name;
+    gs_watch_nnames = n + 1;
+}
+
+#if GS_WATCH
+static const gs_region *gs_watch_regions;   /* the main program's registry */
+static volatile long *gs_watch_count;
+static long gs_watch_cap;
+static uint64_t *gs_watch_peaks;
+static char gs_watch_path[1024];
+static volatile int gs_watch_stopping;
+static int gs_watch_running;
+#ifdef _WIN32
+static HANDLE gs_watch_thread;
+static ULONGLONG gs_watch_t0;
+#else
+static pthread_t gs_watch_thread;
+static struct timespec gs_watch_t0;
+#endif
+
+static uint64_t gs_watch_ms(void) {
+    #ifdef _WIN32
+        return (uint64_t)(GetTickCount64() - gs_watch_t0);
+    #else
+        struct timespec t;
+        clock_gettime(CLOCK_MONOTONIC, &t);
+        return (uint64_t)(t.tv_sec - gs_watch_t0.tv_sec) * 1000 +
+               (uint64_t)((t.tv_nsec - gs_watch_t0.tv_nsec) / 1000000);
+    #endif
+}
+
+static void gs_watch_write(int done) {
+    char tmp[1100];
+    snprintf(tmp, sizeof tmp, "%s.tmp", gs_watch_path);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return;
+    long n = *gs_watch_count;
+    if (n > gs_watch_cap) n = gs_watch_cap;
+    fprintf(f, "goose memory 1\nms %llu\nstate %s\nregions %ld\n",
+            (unsigned long long)gs_watch_ms(), done ? "done" : "running", n);
+    for (long i = 0; i < n; i++) {
+        const gs_region *r = &gs_watch_regions[i];
+        uint8_t *base = *(uint8_t *const volatile *)&r->base;
+        gs_stack *s = *(gs_stack *const volatile *)&r->stack;
+        uint64_t used = 0, committed = 0;
+        if (base && s) {
+            uint8_t *top = *(uint8_t *volatile *)&s->top;
+            if (top >= base && (uint64_t)(top - base) <= r->usable) used = (uint64_t)(top - base);
+            #ifdef _WIN32
+                uint8_t *c = *(uint8_t *const volatile *)&r->committed;
+                if (c >= base) committed = (uint64_t)(c - base);
+            #endif
+        }
+        if (used > gs_watch_peaks[i]) gs_watch_peaks[i] = used;
+        const char *label = "";
+        for (long k = 0; k < gs_watch_nnames; k++)
+            if (gs_watch_stacks[k] == s) label = gs_watch_labels[k];
+        fprintf(f, "%ld %llu %llu %llu %s\n", i, (unsigned long long)used,
+                (unsigned long long)gs_watch_peaks[i], (unsigned long long)committed, label);
+    }
+    fputs("end\n", f);
+    fclose(f);
+    #ifdef _WIN32
+        MoveFileExA(tmp, gs_watch_path, MOVEFILE_REPLACE_EXISTING);
+    #else
+        rename(tmp, gs_watch_path);
+    #endif
+}
+
+#ifdef _WIN32
+static DWORD WINAPI gs_watch_main(LPVOID unused) {
+    (void)unused;
+    while (!gs_watch_stopping) {
+        gs_watch_write(0);
+        Sleep(50);
+    }
+    return 0;
+}
+#else
+static void *gs_watch_main(void *unused) {
+    (void)unused;
+    struct timespec pause = { 0, 50 * 1000000L };
+    while (!gs_watch_stopping) {
+        gs_watch_write(0);
+        nanosleep(&pause, NULL);
+    }
+    return NULL;
+}
+#endif
+
+/* On main's thread as the runtime starts: watch its registry, if asked. */
+static void gs_watch_start(void) {
+    const char *path = getenv("GOOSE_MEMORY_WATCH");
+    size_t len = path ? strlen(path) : 0;
+    if (!len || len >= sizeof gs_watch_path || gs_watch_running) return;
+    gs_watch_peaks = (uint64_t *)calloc((size_t)(gs_regions_cap > 0 ? gs_regions_cap : 1),
+                                        sizeof(uint64_t));
+    if (!gs_watch_peaks) return;
+    memcpy(gs_watch_path, path, len + 1);
+    gs_watch_regions = gs_regions;
+    gs_watch_count = &gs_nregions;
+    gs_watch_cap = gs_regions_cap;
+    gs_watch_stopping = 0;
+    #ifdef _WIN32
+        gs_watch_t0 = GetTickCount64();
+        gs_watch_thread = CreateThread(NULL, 0, gs_watch_main, NULL, 0, NULL);
+        gs_watch_running = gs_watch_thread != NULL;
+    #else
+        clock_gettime(CLOCK_MONOTONIC, &gs_watch_t0);
+        gs_watch_running = pthread_create(&gs_watch_thread, NULL, gs_watch_main, NULL) == 0;
+    #endif
+    if (!gs_watch_running) {
+        free(gs_watch_peaks);
+        gs_watch_peaks = NULL;
+    }
+}
+
+/* Before the watched registry goes (or the program exits): the thread
+   stops, and the file says how the program ended. */
+static void gs_watch_stop(const gs_region *regions) {
+    if (!gs_watch_running || regions != gs_watch_regions) return;
+    gs_watch_stopping = 1;
+    #ifdef _WIN32
+        WaitForSingleObject(gs_watch_thread, INFINITE);
+        CloseHandle(gs_watch_thread);
+    #else
+        pthread_join(gs_watch_thread, NULL);
+    #endif
+    gs_watch_running = 0;
+    gs_watch_write(1);
+    free(gs_watch_peaks);
+    gs_watch_peaks = NULL;
+    gs_watch_regions = NULL;
+}
+
+#ifndef GS_HOSTED_JIT
+static void gs_watch_at_exit(void) { gs_watch_stop(gs_watch_regions); }
+#endif
+#else
+static void gs_watch_start(void) {}
+static void gs_watch_stop(const gs_region *regions) { (void)regions; }
+#endif
+
 GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t gap,
                         uint64_t budget, int64_t mainregions, int64_t workerregions) {
     gs_argc = argc;
@@ -1488,6 +1676,12 @@ GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t gap,
     gs_regions_begin(mainregions);
     gs_native_stack_init();
     gs_scan_init();
+    gs_watch_start();
+    #if GS_WATCH && !defined(GS_HOSTED_JIT)
+        /* A program on its own ends by returning from main or exiting: the
+           file says so then. Run by the compiler, gs_release_regions does. */
+        if (gs_watch_running) atexit(gs_watch_at_exit);
+    #endif
 }
 
 /* ---------------------------------------------------------------------------

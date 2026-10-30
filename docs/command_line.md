@@ -436,6 +436,7 @@ or, for the shell at hand, `source <(goose completion bash)`.
 | `NO_COLOR` | Set and not empty: no color, unless `--color` says otherwise. |
 | `CLICOLOR_FORCE` | Set to anything but 0: color, even when stderr is not a terminal. |
 | `GOOSE_TCCLIB` | Where TinyCC's headers and support library are, for a compiler moved away from both its installation and its build tree. |
+| `GOOSE_MEMORY_WATCH` | A file a running program reports its data stacks to, 20 times a second and once more as it ends, for a development environment to show: each stack's bytes in use, the most seen in use, the bytes committed (an exact high-water mark on Windows) and the global it is for. A `goose run` with it set keeps every stack's top in memory rather than in a local, so a growing array shows its size, a little slower; a built program reports the tops as last stored. The main program's stacks only, not a worker's. |
 
 Without `--stdlib` or `GOOSE_STDLIB`, the compiler looks for the standard
 library in a `stdlib` directory beside its executable, then in the parent

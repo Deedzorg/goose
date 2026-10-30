@@ -1673,7 +1673,12 @@ int Main(int argc, char **argv) {
         for (auto &rf : runtime_files)
             if (string_view(rf.name) == "runtime_ext.h") runtime_ext_text = rf.text;
         auto stackcfg = StackConfigOf(cdefines);
-        CodeGen cg(ast, runtime_ext_text, includes, norfcheck, library, stackcfg.maxstacks);
+        // A run whose memory is watched keeps the stacks' tops where the
+        // runtime's watch reads them (runtime_impl.h, GOOSE_MEMORY_WATCH).
+        auto watched = getenv("GOOSE_MEMORY_WATCH");
+        auto livetops = jit && watched && *watched;
+        CodeGen cg(ast, runtime_ext_text, includes, norfcheck, library, stackcfg.maxstacks,
+                   livetops);
         if (stacks) cg.StackReport(msgs, stackcfg);
         // The packages whose native parts the program needs, which a JIT
         // run takes functions from and a build links: its own, when it has

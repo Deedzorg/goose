@@ -231,11 +231,11 @@ inline void CodeGen::PlanTopClasses(FnSpec *sp) {
     walk(sp->body);
     auto nonfixedret = false;
     for (auto rt : sp->rets) nonfixedret |= IsBytesT(rt);
-    topown = !unknown;
+    topown = !unknown && !livetops;
     topglob = topown && !fatparam && !fatfv;
     topcap = topglob && capresz && !farreturn;
     topdst = topglob && !capresz && !globals && nonfixedret && !farreturn && !fromids.count(sp);
-    reftops = !topglob && RefTopsOk(sp, farreturn);
+    reftops = !topglob && !livetops && RefTopsOk(sp, farreturn);
     cachetops = topown || reftops;
 }
 
@@ -852,6 +852,8 @@ inline void CodeGen::InitGlobalStack(VarDef *d) {
     auto stk = gstks[d];
     globalregions++;
     L("gs_stack_init(", stk, ");");
+    // Its name, for a development environment watching memory.
+    L("gs_watch_name(", stk, ", \"", d->name, "\");");
     if (IsResz(d->type) && IsFrameObj(d->type)) {
         // The tail header is set when the value is constructed.
     } else if (IsResz(d->type)) {
@@ -864,6 +866,7 @@ inline void CodeGen::InitGlobalStack(VarDef *d) {
         auto &p = gpools[d];
         globalregions++;
         L("gs_stack_init(", p.second, ");");
+        L("gs_watch_name(", p.second, ", \"", d->name, " (free slots)\");");
         L(p.first, ".base = ", Top(p.second), ";");
         L(p.first, ".len = 0;");
     }
