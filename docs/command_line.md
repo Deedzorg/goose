@@ -355,7 +355,7 @@ goose format < in.goose > out.goose
 
 `goose format` rewrites each file in place in the standard layout: the
 indentation, the spaces between tokens, blank lines and trailing commas.
-Line breaks stay where they are. A directory stands for the `.goose` files
+Line breaks stay where they are. A directory stands for the `.goose` and `.gs` files
 under it, except those in directories whose names start with a dot and in
 build trees (directories holding a `CMakeCache.txt`). With no file, or `-`,
 it formats standard input to standard output. A file that does not parse is

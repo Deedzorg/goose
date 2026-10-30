@@ -71,7 +71,7 @@ import mylib from "../mylib";                      // a directory, used in place
 ```
 
 `import name from "source";` declares the package `name` and imports its
-module `name.goose`; its other modules are imported with
+module `name.goose` (or `name.gs`); its other modules are imported with
 `import name.other;`. A git source needs a ref after `@`. A tag or a commit
 pins the package. A branch does too, until
 `goose fetch --update program.goose` fetches it again. A path is relative

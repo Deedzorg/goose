@@ -857,7 +857,9 @@ inline bool FormatFilesUnder(const string &dir, vector<string> &files) {
                 it.disable_recursion_pending();
             continue;
         }
-        if (e.path().extension() == ".goose" && e.is_regular_file(ec2)) found.push_back(e.path().string());
+        auto ext = e.path().extension();
+        if ((ext == ".goose" || ext == ".gs") && e.is_regular_file(ec2))
+            found.push_back(e.path().string());
     }
     sort(found.begin(), found.end());
     files.insert(files.end(), found.begin(), found.end());

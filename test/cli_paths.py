@@ -85,6 +85,24 @@ def check_cli_paths(exe, cc, base):
         require(code == 1 and text.count(f"{stdlib.as_posix()}/no_such_module.goose") == 1,
                 "an import resolving nowhere, with the standard library found three ways", text)
 
+        # A module may be spelled name.gs: imported relatively, from the
+        # package's root and from a declared package; name.goose wins no
+        # contest, a module spelled both ways is an error.
+        (root / "short" / "lib").mkdir(parents=True)
+        tc.write_text(root / "short" / "near.gs", "fn near() -> i64 { 1 }\n")
+        tc.write_text(root / "short" / "under.gs", "fn under() -> i64 { 2 }\n")
+        tc.write_text(root / "short" / "lib" / "lib.gs",
+                      "namespace lib;\nfn three() -> i64 { 3 }\n")
+        tc.write_text(root / "short" / "app.gs",
+                      'import std;\nimport .near;\nimport under;\nimport lib from "./lib";\n'
+                      "fn main() { print(near() + under() + lib::three()); }\n")
+        code, text = run([exe, root / "short" / "app.gs"])
+        require(code == 0 and text.strip() == "6", "modules spelled .gs", text)
+        tc.write_text(root / "short" / "near.goose", "fn near() -> i64 { 1 }\n")
+        code, text = run([exe, "check", root / "short" / "app.gs"])
+        require(code == 1 and "app.gs:2: error: both " in text and "near.goose and " in text and
+                "near.gs exist" in text, "a module spelled .goose and .gs", text)
+
         (root / "adir").mkdir()
         code, text = run([exe, "check", root / "adir"])
         require(code == 1 and "cannot open file: " in text, "a directory as the source", text)

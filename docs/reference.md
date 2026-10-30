@@ -3469,7 +3469,9 @@ Spec §9.3.
 ### Files and imports
 
 A program is compiled whole, from the *root file* named on the command
-line. `import a.b.c;` includes the file `a/b/c.goose` once. The path is
+line. `import a.b.c;` includes the file `a/b/c.goose` once, or
+`a/b/c.gs`, the short spelling, where there is no `.goose` file (a module
+spelled both ways is an error). The path is
 resolved first relative to the root of the importing file's package (for
 the program's own files, that is the directory of the root file), then as
 a module of a package the root declared, then in the standard library's

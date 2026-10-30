@@ -74,6 +74,21 @@ static bool FileExists(const string &path) {
     return f != nullptr;
 }
 
+// The file of the module at base: base.goose, else base.gs, the short
+// spelling. A module spelled both ways is an error, so which file an import
+// means is never a guess. Neither existing, it is the .goose one, which the
+// error that it was not found names.
+static string ModuleFile(const string &base) {
+    auto goose = cat(base, ".goose");
+    auto gs = cat(base, ".gs");
+    auto have_goose = FileExists(goose);
+    auto have_gs = FileExists(gs);
+    if (have_goose && have_gs)
+        throw CompileError { cat("both ", ForwardSlashes(goose), " and ", ForwardSlashes(gs),
+                                 " exist: keep one") };
+    return have_gs ? gs : goose;
+}
+
 // A path split on either separator, with "." and cancelled "x/.." dropped. A
 // path with a leading separator keeps a leading empty component ("/a" ->
 // {"", "a"}), so two rooted paths share it and a rooted and a relative one
@@ -344,15 +359,15 @@ void ParseProgram(Ast &ast, const string &rootpath, const vector<string> &stdlib
                         if (std::find(req.begin(), req.end(), imppkg) == req.end())
                             req.push_back(imppkg);
                     }
-                    imppath = cat(ast.packages[imppkg].root, imp.path, ".goose");
+                    imppath = ModuleFile(cat(ast.packages[imppkg].root, imp.path));
                 } else if (imp.relative) {
-                    imppath = cat(DirOf(path), imp.path, ".goose");
+                    imppath = ModuleFile(cat(DirOf(path), imp.path));
                 } else {
                     // A file under this package's root; a module of a package the
                     // root declared (`import pkg;` is its entry, `import pkg.sub;`
                     // its sub.goose); a blessed name, its package loaded as if
                     // the root had declared it (§4.5); the standard library.
-                    auto local = cat(ast.packages[pkg].root, imp.path, ".goose");
+                    auto local = ModuleFile(cat(ast.packages[pkg].root, imp.path));
                     auto first = imp.path.substr(0, imp.path.find('/'));
                     auto rest = imp.path.size() > first.size() ? imp.path.substr(first.size() + 1)
                                                                : first;
@@ -369,14 +384,14 @@ void ParseProgram(Ast &ast, const string &rootpath, const vector<string> &stdlib
                                         cat(imp.path, " is both a file of this package (", local,
                                             ") and the declared package ", first, "'s module"));
                         imppkg = it->second.pkg;
-                        imppath = cat(ast.packages[imppkg].root, rest, ".goose");
+                        imppath = ModuleFile(cat(ast.packages[imppkg].root, rest));
                     } else if (blessed) {
                         try {
                             imppkg = loadblessed(*blessed);
                         } catch (CompileError &e) {
                             ImportError(filename, imp, e.msg);
                         }
-                        imppath = cat(ast.packages[imppkg].root, rest, ".goose");
+                        imppath = ModuleFile(cat(ast.packages[imppkg].root, rest));
                     } else {
                         imppath = local;
                         if (!FileExists(local)) {

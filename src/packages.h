@@ -305,7 +305,7 @@ inline string FetchPackage(const PackageSource &s, const string &name) {
 
 // The root directory of the package `name` from `source`: the directory
 // itself for a path, the checkout in the cache for a git source; either
-// must hold `<name>.goose`.
+// must hold `<name>.goose` (or `<name>.gs`).
 inline string PackageRoot(const PackageSource &source, const string &name) {
     string dir;
     if (source.ispath) {
@@ -317,7 +317,7 @@ inline string PackageRoot(const PackageSource &source, const string &name) {
     } else {
         dir = FetchPackage(source, name);
     }
-    if (!PathExists(cat(dir, name, ".goose")))
+    if (!PathExists(cat(dir, name, ".goose")) && !PathExists(cat(dir, name, ".gs")))
         throw CompileError { cat("the package ", name, " at ", dir, " has no ", name, ".goose") };
     return dir;
 }

@@ -153,7 +153,8 @@ inline vector<string> PackageExternNames(const Ast &ast, int pkg, set<string> *l
                     it.disable_recursion_pending();
                 continue;
             }
-            if (it->path().extension() != ".goose" || !it->is_regular_file(fec)) continue;
+            auto ext = it->path().extension();
+            if ((ext != ".goose" && ext != ".gs") || !it->is_regular_file(fec)) continue;
             string text;
             if (!LoadSource(path, text)) continue;
             try {
