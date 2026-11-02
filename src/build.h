@@ -18,6 +18,9 @@ struct BuildOptions {
     bool dryrun = false;      // --dry-run: print the commands and run nothing
     bool standalone = false;  // --standalone: no runtime object
     string exe;               // -o: the executable; "" puts it beside the root source
+    string target;            // --target: "" for this machine, or wasm64 (Emscripten)
+
+    bool Wasm() const { return target == "wasm64"; }
 };
 
 inline string AbsolutePath(const string &path) {
@@ -43,6 +46,12 @@ struct Builder {
     const BuildOptions &opts;
     FILE *msgs;
 
+    // The command that runs the C driver, before its arguments.
+    vector<string> Driver() const {
+        if (tc.runner.empty()) return { tc.cc };
+        return { tc.runner, "-E", tc.cc };
+    }
+
     // The compile flags of both styles: optimization, or debug information
     // and none of it. Defines go into the C itself (main.cpp), never here.
     vector<string> CFlags() const {
@@ -52,13 +61,28 @@ struct Builder {
             else f.push_back("/O2");
             return f;
         }
-        if (opts.debug) return { "-O0", "-g" };
-        return { "-O2" };
+        vector<string> f;
+        // 64-bit WebAssembly (memory64): pointers stay the 8 bytes every
+        // layout the compiler computes assumes (docs/design/wasm.md).
+        if (opts.Wasm()) f.push_back("-m64");
+        if (opts.debug) f.push_back("-O0"), f.push_back("-g");
+        else f.push_back("-O2");
+        return f;
+    }
+
+    // What a wasm64 link adds: a module and the JavaScript that loads it in
+    // Node, with the real file system (NODERAWFS) for the os module, memory
+    // that grows to the most Node gives memory64, and a native stack the
+    // size of Linux's main thread's.
+    vector<string> WasmLinkFlags() const {
+        return { "-sENVIRONMENT=node", "-sNODERAWFS=1", "-sEXIT_RUNTIME=1",
+                 "-sALLOW_MEMORY_GROWTH=1", "-sMAXIMUM_MEMORY=16GB", "-sSTACK_SIZE=8MB" };
     }
 
     // The system libraries a program links beyond the C library, in the cc
     // style: none on Windows, where they live in the C runtime.
     vector<string> SystemLibs() const {
+        if (opts.Wasm()) return {};
         #ifdef _WIN32
             return {};
         #else
@@ -105,7 +129,7 @@ struct Builder {
     // (a package's includes and defines) after the usual ones.
     bool CompileObject(const string &src, const string &obj, const string &what,
                        const string &logfile, const vector<string> &extra = {}) const {
-        vector<string> argv = { tc.cc };
+        vector<string> argv = Driver();
         for (auto &f : CFlags()) argv.push_back(f);
         for (auto &f : extra) argv.push_back(f);
         if (tc.style == "msvc") {
@@ -127,7 +151,7 @@ struct Builder {
     // intermediates: a package's JIT library.
     bool LinkShared(const vector<string> &objects, const vector<string> &libs, const string &out,
                     const string &builddir, const string &logfile, const string &what) const {
-        vector<string> argv = { tc.cc };
+        vector<string> argv = Driver();
         if (tc.style == "msvc") {
             argv.push_back("/nologo");
             argv.push_back("/LD");
@@ -150,7 +174,7 @@ struct Builder {
     // `rsps` into `exe`, with `builddir` taking the intermediates.
     bool Link(const string &src, const vector<string> &objects, const vector<string> &rsps,
               const string &exe, const string &builddir, const string &logfile) const {
-        vector<string> argv = { tc.cc };
+        vector<string> argv = Driver();
         for (auto &f : CFlags()) argv.push_back(f);
         if (tc.style == "msvc") {
             argv.push_back(cat("/Fe:", exe));
@@ -162,6 +186,8 @@ struct Builder {
         } else {
             argv.push_back(src);
             for (auto &o : objects) argv.push_back(o);
+            if (opts.Wasm())
+                for (auto &f : WasmLinkFlags()) argv.push_back(f);
             argv.push_back("-o");
             argv.push_back(exe);
             for (auto &r : rsps) argv.push_back(cat("@", r));
@@ -227,9 +253,14 @@ inline int BuildExecutable(const string &rootfile, const string &cfile, const st
     auto exe = opts.exe;
     if (exe.empty()) {
         exe = cat(DirOf(rootfile), output.empty() ? PathStem(rootfile) : output);
+        // wasm64: prog.js, which Node runs, and prog.wasm beside it.
+        auto ext = opts.Wasm() ? string(".js") : string();
         #ifdef _WIN32
-            if (exe.size() < 4 || exe.compare(exe.size() - 4, 4, ".exe") != 0) exe += ".exe";
+            if (!opts.Wasm()) ext = ".exe";
         #endif
+        if (!ext.empty() && (exe.size() < ext.size() ||
+                             exe.compare(exe.size() - ext.size(), ext.size(), ext) != 0))
+            exe += ext;
     }
     if (!opts.dryrun) {
         std::error_code ec;
@@ -237,7 +268,9 @@ inline int BuildExecutable(const string &rootfile, const string &cfile, const st
         if (!exedirpath.empty()) filesystem::create_directories(exedirpath, ec);
     }
     if (!b.Link(cfile, objects, nativersps, exe, builddir, cat(builddir, "/cc.log"))) return 1;
-    if (!opts.dryrun) fprintf(msgs, "built %s\n", exe.c_str());
+    if (!opts.dryrun)
+        fprintf(msgs, "built %s%s\n", exe.c_str(),
+                opts.Wasm() ? cat(" (run it with: node ", exe, ")").c_str() : "");
     return 0;
 }
 

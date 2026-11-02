@@ -11,10 +11,13 @@
 - [6. Where relocation's changes fall](#6-where-relocations-changes-fall)
 - [7. Wasm costs outside the data stacks](#7-wasm-costs-outside-the-data-stacks)
 - [Recommendation](#recommendation)
+- [8. Status and staged plan](#8-status-and-staged-plan)
 
 </details>
 
-This is a proposal and is not implemented. Spec §10.4 says that platforms
+Milestone 1 of the plan in [§8](#8-status-and-staged-plan) is implemented on
+the fork branch `feature/wasm`: `goose build --target wasm64`, with fixed
+partitions and no growth checks. The rest is a proposal. Spec §10.4 says that platforms
 without address-space reservation fall back to "index-based references +
 bounds-checked growth", and leaves the details open (open issue 15). This
 note works them out. Its cost figures are estimates, not measurements.
@@ -196,3 +199,88 @@ In order of risk, not size:
    moves a stack on every growth, so the test suite exposes every stale
    decoded pointer, and use the benchmark suite to measure the cost. Only
    then bring in a Wasm toolchain.
+
+## 8. Status and staged plan
+
+### Why wasm64 first
+
+The C backend lays out a reference as 8 bytes and a slice as 16
+([implementation §6.1](../implementation.md#61-values)), and references can be
+fields, so wasm32's 4-byte pointers would change layouts throughout codegen.
+64-bit WebAssembly (memory64) keeps every layout as it is, and the generated C
+compiled unchanged on the first try. Memory64 runs in Node 24, Chrome and
+Firefox, but not in WASI runtimes, whose preview 1 interface is 32-bit. So the
+first target is Emscripten's `wasm64`, run by Node. wasm32 needs the handles
+of §4 or 4-byte references, and is a later milestone.
+
+### Milestone 1: `goose build --target wasm64` under Node (done)
+
+```
+goose build --target wasm64 prog.goose     # prog.js + prog.wasm
+node prog.js args...
+```
+
+* **Toolchain.** Emscripten, found by `--cc` (emcc, emcc.py or an emsdk
+  directory), else `EMSDK`, else `emcc` on PATH (`FindEmscripten`,
+  toolchain.h). On Windows Goose runs `emcc.py` with the emsdk's Python
+  rather than the batch file. The runtime object is cached per Emscripten
+  version, as for any C compiler.
+* **Flags** (build.h): `-m64` for compiling, and for linking
+  `-sENVIRONMENT=node -sNODERAWFS=1` (the real file system, for `os`),
+  `-sEXIT_RUNTIME=1`, memory that grows to Node's 16 GB memory64 cap, and an
+  8 MB native stack.
+* **Data stacks: fixed partitions (§3) without growth checks.** Each
+  region is 64 MB by default (`--stack-reserve` changes it), taken from the
+  end of linear memory with `sbrk`, untouched. Emscripten's `mmap` would
+  zero all of it. A region's 1 MB gap is zeroed instead of protected, and the
+  runtime reports a region whose gap is no longer zero as the program ends
+  (`gs_gaps_overrun`, at `gs_end` and `atexit`): the same message as a
+  native overflow, exit code 1. This finds an overrun late, not as it
+  happens: the program has already run on, and a write that skipped the gap
+  or wrote zeros goes unseen. Until milestone 2, wasm64 builds are **not
+  memory-safe for programs that outgrow a stack**.
+* **Refused with a message:** threads (`cg.usesthreads`), packages with
+  native parts (gfx, physics, ui, audio), `--target` outside `goose build`.
+* **Test:** `test/wasm_target.py`, run by `test/run_tests.py`; skipped
+  without Emscripten or Node. It builds six samples that cover arguments,
+  stdin, files, a C header and JSON, compares them with `samples/expected/`,
+  checks that an overrun of a 256 KB stack is reported and that the same
+  program fits in 64 MB, and checks the refusals.
+* **Result on Windows (Emscripten 6.0.13, Node 24.19):** 25 of the 31 samples
+  build and print their expected output byte for byte. The other six are
+  the threads sample and the five gfx/physics/ui samples, all refused as
+  above. Rough speed against the native clang-cl build: sieve 64 vs 57 ms,
+  raytrace 12 vs 5.7 ms, image filters 5.8 vs 0.47 ms (no SIMD yet).
+
+### Milestone 2: growth checks (recommendation 1)
+
+Add the checks of §2 as a configuration of their own (`GS_GROWTH_CHECKS`),
+on by default for wasm and runnable natively, so that the whole test suite
+covers them. A failed check aborts with the native overflow message, as
+it happens. This is what makes wasm64 builds memory-safe. Then measure the
+cost natively with the benchmark suite.
+
+### Milestone 3: the browser
+
+* `--target wasm64-web`: `-sENVIRONMENT=web`, MEMFS instead of NODERAWFS,
+  `print` to a page element or the console, and a small HTML loader page
+  written beside `prog.js`. `goose build` could also serve it locally for a
+  quick look.
+* Files: preload a directory (`--embed-dir`) and let a page hand files in.
+* Test: a headless browser run in CI where one is available, else Node with
+  the web build's JavaScript.
+
+### Milestone 4: more of the language and the libraries
+
+* Threads: `-pthread` with shared memory (cross-origin isolated pages in
+  browsers, always in Node), each worker's regions taken the same way.
+* gfx through WebGPU (Emscripten's `webgpu.h`, or SDL3's Emscripten port) and
+  canvas input, then ui and physics.
+* `-msimd128`, and a look at what keeps the image filters slow.
+* `goose toolchain` reporting Emscripten, and `--target` in Goose Studio
+  (build for the web from the IDE).
+
+### Milestone 5: wasm32 and WASI
+
+Relocating stacks with handles (§4), or 4-byte references, so the same
+programs run as wasm32 under wasmtime and other WASI runtimes, and in Safari.

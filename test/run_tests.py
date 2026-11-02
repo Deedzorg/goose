@@ -2347,6 +2347,19 @@ def main():
     if cc:
         r.show_task(extern_dylib)
 
+    def wasm_target():
+        from wasm_target import check_wasm_target
+        try:
+            skipped = check_wasm_target(exe, gendir)
+            if skipped:
+                r.say(f"skip wasm64 target ({skipped})")
+            else:
+                r.ok("wasm64 target: samples built with Emscripten print under Node what they "
+                     "print natively, a stack overrun is reported at exit, threads refused")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("wasm64 target", str(e))
+    r.show_task(wasm_target)
+
     def resource_paths():
         from resource_paths import check_resource_paths
         try:

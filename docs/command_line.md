@@ -157,6 +157,7 @@ beyond those in [§5](#5-options-for-run-build-and-check):
 | `--debug` | Turn on the overflow, range and tag checks (`GS_DEBUG=1`), and build the C without optimization and with debug information (`/Od /Zi`, or `-O0 -g`), for a debugger. |
 | `--cc name\|path` | The C compiler, as above. |
 | `--standalone` | Compile the runtime into the program, rather than linking the runtime object built once per C compiler. |
+| `--target wasm64` | Build 64-bit WebAssembly with Emscripten (`EMSDK`, `emcc` on PATH, or `--cc`): `prog.js` and `prog.wasm`, which `node prog.js` runs. No threads or packages with native parts yet; each data stack gets 64 MB unless `--stack-reserve` says otherwise ([design/wasm.md](design/wasm.md#8-status-and-staged-plan)). `--target native` is the default. |
 | `-v` | Print each command the build runs, and what it prints. |
 | `--dry-run` | Print the commands the build would run, with their paths, and run none of them. A Makefile or CMake project can take them from here. |
 

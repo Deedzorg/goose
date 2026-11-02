@@ -749,6 +749,10 @@ R"(  --cc name|path        The C compiler: msvc, clang-cl, clang, gcc, cc or a
                         path (or GOOSE_CC; by default the first one found).
   --standalone          Compile the runtime into the program rather than link
                         the runtime object built once per C compiler.
+  --target wasm64       Build 64-bit WebAssembly with Emscripten (EMSDK, emcc
+                        on PATH, or --cc): prog.js and prog.wasm, which
+                        `node prog.js` runs. No threads or gfx yet; data
+                        stacks get 64 MB each (--stack-reserve changes it).
   -v                    Print each command the build runs and what it prints.
   --dry-run             Print the commands the build would run, and run none.
 )");
@@ -1337,7 +1341,7 @@ int Main(int argc, char **argv) {
     auto forcejit = false, standalone = false;
     auto json = false, refresh = false, debug = false, verbose = false, dryrun = false;
     auto jsondiag = false;
-    string ccrequest;
+    string ccrequest, target;
     // The inlining at its highest. The C compiler optimizes whatever the
     // level, unless --debug (Builder::CFlags).
     auto optlevel = 2;
@@ -1432,6 +1436,14 @@ int Main(int argc, char **argv) {
         else if (arg == "--include" && i + 1 < argc) includenames.push_back(argv[++i]);
         else if (arg == "--stdlib" && i + 1 < argc) stdlibdir = argv[++i];
         else if (arg == "--cc" && i + 1 < argc) ccrequest = argv[++i];
+        else if (arg == "--target" && i + 1 < argc) {
+            target = argv[++i];
+            if (target == "native") target.clear();
+            else if (target != "wasm64") {
+                fprintf(stderr, "--target takes native or wasm64, not %s\n", target.c_str());
+                return 1;
+            }
+        }
         else if (arg == "--json") json = true;
         else if (arg == "--refresh") refresh = true;
         else if (arg == "--debug") {
@@ -1501,8 +1513,18 @@ int Main(int argc, char **argv) {
                             "(-o out.c) writes the C for a C host\n");
             return 1;
         }
-        buildopts = BuildOptions { debug, verbose, dryrun, standalone, outname };
+        buildopts = BuildOptions { debug, verbose, dryrun, standalone, outname, target };
         outname.clear();
+        // wasm64 regions are fixed slices of linear memory, which Node caps
+        // at 16 GB for every stack together (docs/design/wasm.md §3): a
+        // smaller default than the native 2 GB of address space.
+        auto reserved = false;
+        for (auto &d : cdefines) reserved |= d.rfind("GS_STACK_RESERVE", 0) == 0;
+        if (buildopts.Wasm() && !reserved) cdefines.push_back("GS_STACK_RESERVE=(64ull << 20)");
+    }
+    if (!target.empty() && verb != "build") {
+        fprintf(stderr, "--target is for goose build\n");
+        return 1;
     }
     if (files.size() > 1 && !multitest) {
         fprintf(stderr, "multiple input files given\n");
@@ -1731,6 +1753,9 @@ int Main(int argc, char **argv) {
                 throw CompileError { cat("cannot write export header: ", headername) };
             if (stats) fprintf(msgs, "wrote %s (%d bytes)\n", headername.c_str(), (int)header.size());
         }
+        if (buildopts.Wasm() && cg.usesthreads)
+            throw CompileError { "--target wasm64 does not support threads yet (no shared "
+                                 "memory: docs/design/wasm.md)" };
         if (jit && !nocgen) {
             // TinyCC's in-memory runner rejects a thread-local section, and
             // the runtime keeps each worker's data stacks in one.
@@ -1749,7 +1774,9 @@ int Main(int argc, char **argv) {
     string tcwhy;
     bool tclooked = false, havetc = false;
     auto findtc = [&] {
-        if (!tclooked) havetc = FindToolchain(ccrequest, tc, tcwhy);
+        if (!tclooked)
+            havetc = buildopts.Wasm() ? FindEmscripten(ccrequest, tc, tcwhy)
+                                      : FindToolchain(ccrequest, tc, tcwhy);
         tclooked = true;
         if (!havetc) fprintf(stderr, "%s\n", tcwhy.c_str());
         return havetc;
@@ -1802,6 +1829,12 @@ int Main(int argc, char **argv) {
                 vector<string> rsps;
                 for (auto pkg : nativepkgs) {
                     auto &p = astp->packages[pkg];
+                    if (buildopts.Wasm()) {
+                        fprintf(stderr, "the %s package has native parts, which --target wasm64 "
+                                        "cannot build yet (docs/design/wasm.md)\n",
+                                p.name.c_str());
+                        return 1;
+                    }
                     if (p.builtin >= 0) {
                         rsps.push_back(BuiltinPackageLinkFile(builtin_packages[p.builtin],
                                                               tc.style, DirOf(exe)));

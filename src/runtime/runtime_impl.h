@@ -542,6 +542,48 @@ static void gs_native_stack_free(void) {
    to give: its address space or an address-space limit exhausted, or
    strict overcommit accounting, which counts even a MAP_NORESERVE mapping.
    Commit-on-touch via overcommit; the gap at the end stays PROT_NONE. */
+#ifdef __EMSCRIPTEN__
+/* WebAssembly (docs/design/wasm.md §3, fixed partitions): linear memory
+   has no unmapped pages, so a region is a slice of it taken off the end by
+   sbrk, untouched (Emscripten's mmap would zero the whole of it), and its
+   gap cannot fault. The gap is zeroed instead, and gs_end reports a region
+   whose gap no longer is: an overrun is found as the program ends, not as
+   it happens, and may have written past the gap into the region after.
+   Growth checks (wasm.md §2) are what will catch it in time. */
+static uint8_t *gs_os_reserve(size_t usable, size_t size) {
+    uintptr_t align = (uintptr_t)gs_page_size;
+    void *p = sbrk((intptr_t)(size + align));
+    if (p == (void *)-1) return NULL;
+    uint8_t *base = (uint8_t *)(((uintptr_t)p + align - 1) / align * align);
+    memset(base + usable, 0, size - usable);
+    return base;
+}
+
+/* Linear memory is never given back. */
+static void gs_release_region(const gs_region *r) { (void)r; }
+
+/* The regions of this thread program whose gap was written: one report, of
+   the first. */
+static int gs_gaps_overrun(void) {
+    for (long i = 0; i < gs_nregions; i++) {
+        const gs_region *r = &gs_regions[i];
+        for (const uint8_t *p = r->base + r->usable; p < r->base + r->size; p++) {
+            if (*p) {
+                char msg[GS_OVERFLOW_TEXT];
+                ssize_t w = write(2, msg, gs_overflow_text(msg, r));
+                (void)w;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* For a main that returns: gs_end checks the gaps itself. */
+static void gs_gaps_at_exit(void) {
+    if (gs_gaps_overrun()) _Exit(1);
+}
+#else
 static uint8_t *gs_os_reserve(size_t usable, size_t size) {
     void *p = mmap(NULL, size, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS
@@ -565,6 +607,7 @@ static uint8_t *gs_os_reserve(size_t usable, size_t size) {
 static void gs_release_region(const gs_region *r) {
     if (munmap(r->base, r->size)) gs_panic("cannot release data stack address space");
 }
+#endif
 
 /* Whether this is the first call of gs_end; and where the later ones wait.
    TinyCC names the memory orders in its stdatomic.h alone. */
@@ -586,6 +629,9 @@ static GS_NORETURN void gs_end(int code) {
     gs_jit_exit(code);
 #else
     if (!gs_end_first()) gs_park();
+    #ifdef __EMSCRIPTEN__
+        if (gs_gaps_overrun()) code = 1;
+    #endif
     fflush(NULL);
     #ifdef __TINYC__
         if (gs_current_thread_id < 0) exit(code);
@@ -1488,6 +1534,9 @@ GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t gap,
     gs_regions_begin(mainregions);
     gs_native_stack_init();
     gs_scan_init();
+    #ifdef __EMSCRIPTEN__
+        atexit(gs_gaps_at_exit);
+    #endif
 }
 
 /* ---------------------------------------------------------------------------

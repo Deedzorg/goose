@@ -1784,6 +1784,48 @@ static void gs_native_stack_free(void) {
    to give: its address space or an address-space limit exhausted, or
    strict overcommit accounting, which counts even a MAP_NORESERVE mapping.
    Commit-on-touch via overcommit; the gap at the end stays PROT_NONE. */
+#ifdef __EMSCRIPTEN__
+/* WebAssembly (docs/design/wasm.md §3, fixed partitions): linear memory
+   has no unmapped pages, so a region is a slice of it taken off the end by
+   sbrk, untouched (Emscripten's mmap would zero the whole of it), and its
+   gap cannot fault. The gap is zeroed instead, and gs_end reports a region
+   whose gap no longer is: an overrun is found as the program ends, not as
+   it happens, and may have written past the gap into the region after.
+   Growth checks (wasm.md §2) are what will catch it in time. */
+static uint8_t *gs_os_reserve(size_t usable, size_t size) {
+    uintptr_t align = (uintptr_t)gs_page_size;
+    void *p = sbrk((intptr_t)(size + align));
+    if (p == (void *)-1) return NULL;
+    uint8_t *base = (uint8_t *)(((uintptr_t)p + align - 1) / align * align);
+    memset(base + usable, 0, size - usable);
+    return base;
+}
+
+/* Linear memory is never given back. */
+static void gs_release_region(const gs_region *r) { (void)r; }
+
+/* The regions of this thread program whose gap was written: one report, of
+   the first. */
+static int gs_gaps_overrun(void) {
+    for (long i = 0; i < gs_nregions; i++) {
+        const gs_region *r = &gs_regions[i];
+        for (const uint8_t *p = r->base + r->usable; p < r->base + r->size; p++) {
+            if (*p) {
+                char msg[GS_OVERFLOW_TEXT];
+                ssize_t w = write(2, msg, gs_overflow_text(msg, r));
+                (void)w;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* For a main that returns: gs_end checks the gaps itself. */
+static void gs_gaps_at_exit(void) {
+    if (gs_gaps_overrun()) _Exit(1);
+}
+#else
 static uint8_t *gs_os_reserve(size_t usable, size_t size) {
     void *p = mmap(NULL, size, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS
@@ -1807,6 +1849,7 @@ static uint8_t *gs_os_reserve(size_t usable, size_t size) {
 static void gs_release_region(const gs_region *r) {
     if (munmap(r->base, r->size)) gs_panic("cannot release data stack address space");
 }
+#endif
 
 /* Whether this is the first call of gs_end; and where the later ones wait.
    TinyCC names the memory orders in its stdatomic.h alone. */
@@ -1828,9 +1871,13 @@ static GS_NORETURN void gs_end(int code) {
     gs_jit_exit(code);
 #else
     if (!gs_end_first()) gs_park();
+    #ifdef __EMSCRIPTEN__
+        if (gs_gaps_overrun()) code = 1;
+    #endif
     fflush(NULL);
     #ifdef __TINYC__
-        if (gs_current_thread_id < 0) exit(code);
+)GSRT"
+R"GSRT(        if (gs_current_thread_id < 0) exit(code);
     #endif
     _Exit(code);
 #endif
@@ -1873,8 +1920,7 @@ GS_API uint8_t *gs_reserve_region(gs_stack *stack) {
 /* Explicit rather than on every rewind: short-lived scratch can reuse its
    pages cheaply, while a long-running application can give them back after
    replacing a large document. Keep the virtual reservation and the partly
-)GSRT"
-R"GSRT(   used final page; limited-array capacity and live borrowed values are below
+   used final page; limited-array capacity and live borrowed values are below
    the synchronized top and remain intact. Each worker has its own registry.
 
    Eager on purpose: Windows decommits, which returns the commit charge as
@@ -2023,7 +2069,8 @@ static void gs_sp_closein(gs_spinner *in, int64_t s) {
     for (j = s; j < in->n; j++) {
         in->key[j] = in->key[j + 1];
         in->max[j] = in->max[j + 1];
-        in->child[j] = in->child[j + 1];
+)GSRT"
+R"GSRT(        in->child[j] = in->child[j + 1];
     }
 }
 
@@ -2062,8 +2109,7 @@ static void gs_sp_fix(gs_sppath *p, int64_t l, int64_t was, int64_t now) {
         int64_t nm = now >= m ? now : was < m ? m : gs_sp_max(p, c, leaf, was);
         if (in->key[k] == key && nm == m) return;
         in->key[k] = key;
-)GSRT"
-R"GSRT(        in->max[k] = nm;
+        in->max[k] = nm;
         was = m;
         now = nm;
     }
@@ -2246,7 +2292,8 @@ GS_API int64_t gs_spans_alloc(uint8_t *base, int64_t *n, uint8_t **top, int64_t 
        from. Where the root holds none, down to the last span. */
     for (l = 0; l < p.h; l++) {
         gs_spinner *in = GS_SPINNER(&p, i);
-        for (k = 0, m = 0; k < in->n && in->max[k] < cnt; k++)
+)GSRT"
+R"GSRT(        for (k = 0, m = 0; k < in->n && in->max[k] < cnt; k++)
             if (in->max[k] > m) m = in->max[k];
         if (k == in->n) break;
         p.node[l] = i;
@@ -2298,8 +2345,7 @@ GS_API int64_t gs_spans_alloc(uint8_t *base, int64_t *n, uint8_t **top, int64_t 
     for (l = p.h; l > 0; l--) {
         gs_spinner *in = GS_SPINNER(&p, p.node[l - 1]);
         int64_t e = p.pos[l - 1], mx = in->max[e], nm = mx;
-)GSRT"
-R"GSRT(        int64_t key = gs_sp_key(&p, p.node[l], l == p.h);
+        int64_t key = gs_sp_key(&p, p.node[l], l == p.h);
         if (c == mx) {
             const int64_t *v = l == p.h ? lf->cnt : GS_SPINNER(&p, p.node[l])->max;
             int64_t w = l == p.h ? lf->n : GS_SPINNER(&p, p.node[l])->n;
@@ -2457,7 +2503,8 @@ GS_API int64_t gs_spans_regrow(uint8_t *base, int64_t *n, uint8_t **top, int64_t
    keeps gcc's type-based alias analysis from taking those for two objects,
    which at -O2 had it drop the program's stores to a set it then searched. */
 
-#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
+)GSRT"
+R"GSRT(#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
 #define GS_MAY_ALIAS __attribute__((may_alias))
 #else
 #define GS_MAY_ALIAS
@@ -2518,8 +2565,7 @@ static void gs_scan_init(void) {
     gs_cpu_ssse3 = (r[2] >> 9) & 1;
 #else
     unsigned a, b, c, d;
-)GSRT"
-R"GSRT(    gs_cpu_ssse3 = __get_cpuid(1, &a, &b, &c, &d) && ((c >> 9) & 1);
+    gs_cpu_ssse3 = __get_cpuid(1, &a, &b, &c, &d) && ((c >> 9) & 1);
 #endif
 }
 
@@ -2651,7 +2697,8 @@ static int64_t gs_scan_any_blocks(const uint8_t *p, int64_t n, const gs_byteset 
 static int64_t gs_scan_pair_blocks(const uint8_t *p, int64_t np, const gs_byteset *a, int64_t d,
                                    const gs_byteset *b) {
     switch (a->kind * 4 + b->kind) {
-        GS_PAIR_CASE(1, 1) GS_PAIR_CASE(1, 2) GS_PAIR_CASE(1, 3) GS_PAIR_CASE(1, 4)
+)GSRT"
+R"GSRT(        GS_PAIR_CASE(1, 1) GS_PAIR_CASE(1, 2) GS_PAIR_CASE(1, 3) GS_PAIR_CASE(1, 4)
         GS_PAIR_CASE(2, 1) GS_PAIR_CASE(2, 2) GS_PAIR_CASE(2, 3) GS_PAIR_CASE(2, 4)
         GS_PAIR_CASE(3, 1) GS_PAIR_CASE(3, 2) GS_PAIR_CASE(3, 3) GS_PAIR_CASE(3, 4)
         GS_PAIR_CASE(4, 1) GS_PAIR_CASE(4, 2) GS_PAIR_CASE(4, 3)
@@ -2690,8 +2737,7 @@ GS_API int64_t gs_scan_pair(const uint8_t *p, int64_t n, const void *a, int64_t 
 }
 
 GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t gap,
-)GSRT"
-R"GSRT(                        uint64_t budget, int64_t mainregions, int64_t workerregions) {
+                        uint64_t budget, int64_t mainregions, int64_t workerregions) {
     gs_argc = argc;
     gs_argv = argv;
     /* A region's usable part is whole pages: the guard gap behind it has to
@@ -2735,6 +2781,9 @@ R"GSRT(                        uint64_t budget, int64_t mainregions, int64_t wor
     gs_regions_begin(mainregions);
     gs_native_stack_init();
     gs_scan_init();
+    #ifdef __EMSCRIPTEN__
+        atexit(gs_gaps_at_exit);
+    #endif
 }
 
 /* ---------------------------------------------------------------------------
@@ -2852,7 +2901,8 @@ static void gs_big_add(gs_big *t, const gs_big *a, const gs_big *b) {
 static void gs_big_sub(gs_big *a, const gs_big *b) {
     uint64_t borrow = 0;
     for (int i = 0; i < a->n; i++) {
-        uint64_t x = (uint64_t)a->d[i] - (i < b->n ? b->d[i] : 0) - borrow;
+)GSRT"
+R"GSRT(        uint64_t x = (uint64_t)a->d[i] - (i < b->n ? b->d[i] : 0) - borrow;
         a->d[i] = (uint32_t)x;
         borrow = x >> 63;
     }
@@ -2891,8 +2941,7 @@ static int gs_float_digits(uint64_t f, int e, int bits, int emin, char *dig, int
     gs_big_add(&t, &r, &mp);
     c = gs_big_cmp(&t, &s);
     if (even ? c >= 0 : c > 0) {
-)GSRT"
-R"GSRT(        gs_big_mul(&s, 10);
+        gs_big_mul(&s, 10);
         ++*k;
     }
     /* Each digit d leaves the remainder r: stop where the digits so far

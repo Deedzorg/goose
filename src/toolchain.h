@@ -38,6 +38,8 @@ struct Toolchain {
     string desc;      // For people: "MSVC 19.44.35207 (toolset 14.44.35207)".
     string id;        // For the cache: name-version-hash of the path and style.
     string how;       // Where it was found: on PATH, in Visual Studio, --cc, ...
+    string runner;    // What cc is a script for, "" where it runs itself: Python for
+                      // Emscripten's emcc.py on Windows.
 };
 
 struct ToolInfo {
@@ -480,6 +482,88 @@ inline bool FindToolchain(string request, Toolchain &out, string &why,
             : cat("cannot find the C compiler ", request, " (", how, ") on PATH");
         return false;
     #endif
+}
+
+// Emscripten, the C compiler for --target wasm64 (docs/design/wasm.md):
+// `request` (--cc: emcc, emcc.py or an emsdk directory), else the emsdk
+// that EMSDK names, else emcc on PATH. On Windows emcc is a batch file,
+// which Goose runs as what it runs: Python on emcc.py, with the emsdk's
+// own Python where there is one (EMSDK_PYTHON first, as emcc.bat takes it).
+inline bool FindEmscripten(const string &request, Toolchain &out, string &why) {
+    auto norm = [](string p) {
+        for (auto &c : p) if (c == '\\') c = '/';
+        return p;
+    };
+    string emcc, how = "--cc";
+    if (!request.empty()) {
+        auto r = norm(request);
+        if (filesystem::is_directory(filesystem::path(r))) emcc = cat(r, "/upstream/emscripten/emcc");
+        else emcc = r;
+    } else if (auto env = getenv("EMSDK"); env && *env) {
+        emcc = cat(norm(env), "/upstream/emscripten/emcc");
+        how = "EMSDK";
+    } else {
+        emcc = norm(FindOnPath("emcc", InheritedPath()));
+        how = "on PATH";
+    }
+    // emcc, emcc.bat or emcc.py: the script beside it is what runs.
+    auto dot = emcc.find_last_of('.');
+    if (dot != string::npos && dot > emcc.find_last_of('/')) emcc = emcc.substr(0, dot);
+    string runner;
+    #ifdef _WIN32
+        auto script = cat(emcc, ".py");
+        if (auto py = getenv("EMSDK_PYTHON"); py && *py) runner = py;
+        else {
+            // <emsdk>/upstream/emscripten/emcc: the emsdk's python/<version>/python.exe.
+            auto emsdk = filesystem::path(emcc).parent_path().parent_path().parent_path();
+            std::error_code ec;
+            for (auto &e : filesystem::directory_iterator(emsdk / "python", ec))
+                if (PathExists((e.path() / "python.exe").string()))
+                    runner = norm((e.path() / "python.exe").string());
+            if (runner.empty()) runner = FindOnPath("python", InheritedPath());
+        }
+    #else
+        auto script = emcc;
+    #endif
+    if (emcc.empty() || !PathExists(script)) {
+        why = request.empty()
+            ? "cannot find Emscripten (looked at EMSDK and for emcc on PATH): install the emsdk "
+              "(https://emscripten.org/docs/getting_started/downloads.html) and set EMSDK, or "
+              "give --cc <emsdk directory or emcc>"
+            : cat("cannot find Emscripten's emcc at ", request);
+        return false;
+    }
+    #ifdef _WIN32
+        if (runner.empty()) {
+            why = cat("cannot find the Python that runs ", script, ": set EMSDK_PYTHON");
+            return false;
+        }
+    #endif
+    out = Toolchain {};
+    out.name = "emcc";
+    out.style = "cc";
+    out.cc = script;
+    out.runner = runner;
+    out.how = how;
+    vector<string> argv;
+    if (!runner.empty()) argv = { runner, "-E", script };
+    else argv = { script };
+    argv.push_back("--version");
+    auto r = RunProcess(argv);
+    // "emcc (Emscripten gcc/clang-like replacement ...) 4.0.10 (hash)".
+    auto line = r.started ? FirstLine(r.output) : string();
+    auto close = line.find(") ");
+    if (close != string::npos) {
+        auto v = line.substr(close + 2);
+        out.version = v.substr(0, v.find(' '));
+    }
+    if (out.version.empty()) {
+        why = cat(script, " --version failed", r.output.empty() ? string() : cat(":\n", r.output));
+        return false;
+    }
+    out.desc = cat("Emscripten ", out.version);
+    out.id = cat("emcc-", out.version, "-", Hex8(cat(script, "|", runner)));
+    return true;
 }
 
 // Everything `goose toolchain` reports: the C toolchain, cmake and git.
