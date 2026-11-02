@@ -15,10 +15,13 @@
 #define GOOSE_H
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct {
     uint8_t *top;
+    uint8_t *lim;   /* Where its growth stops (the runtime's gs_stack). */
 } gs_stack;
 
 #pragma pack(push, 1)
@@ -31,6 +34,12 @@ typedef struct { gs_rhdr *hdr; gs_stack *stk; } gs_rref;
    the header's count grows. */
 static inline void gs_bld_append(gs_rref b, const void *p, int64_t n) {
     if (n <= 0) return;
+    /* A library built for a JIT run has no runtime to report through. */
+    if (b.stk->lim && (int64_t)(b.stk->lim - b.stk->top) < n) {
+        fputs("goose runtime error: data stack overflow: C appended past the stack's "
+              "reservation\n", stderr);
+        exit(1);
+    }
     memcpy(b.stk->top, p, (size_t)n);
     b.stk->top += n;
     b.hdr->len += n;

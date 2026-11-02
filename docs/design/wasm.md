@@ -15,9 +15,10 @@
 
 </details>
 
-Milestone 1 of the plan in [§8](#8-status-and-staged-plan) is implemented on
-the fork branch `feature/wasm`: `goose build --target wasm64`, with fixed
-partitions and no growth checks. The rest is a proposal. Spec §10.4 says that platforms
+Milestones 1 and 2 of the plan in [§8](#8-status-and-staged-plan) are
+implemented on the fork branch `feature/wasm`: `goose build --target wasm64`
+with fixed partitions, and the growth checks of §2 (`GS_GROWTH_CHECKS`). The
+rest is a proposal. Spec §10.4 says that platforms
 without address-space reservation fall back to "index-based references +
 bounds-checked growth", and leaves the details open (open issue 15). This
 note works them out. Its cost figures are estimates, not measurements.
@@ -237,8 +238,9 @@ node prog.js args...
   (`gs_gaps_overrun`, at `gs_end` and `atexit`): the same message as a
   native overflow, exit code 1. This finds an overrun late, not as it
   happens: the program has already run on, and a write that skipped the gap
-  or wrote zeros goes unseen. Until milestone 2, wasm64 builds are **not
-  memory-safe for programs that outgrow a stack**.
+  or wrote zeros goes unseen. Milestone 2's growth checks now stop the
+  overrun as it happens; the gap scan stays behind them, and reports what
+  no check stopped as a Goose bug.
 * **Refused with a message:** threads (`cg.usesthreads`), packages with
   native parts (gfx, physics, ui, audio), `--target` outside `goose build`.
 * **Test:** `test/wasm_target.py`, run by `test/run_tests.py`; skipped
@@ -252,13 +254,57 @@ node prog.js args...
   above. Rough speed against the native clang-cl build: sieve 64 vs 57 ms,
   raytrace 12 vs 5.7 ms, image filters 5.8 vs 0.47 ms (no SIMD yet).
 
-### Milestone 2: growth checks (recommendation 1)
+### Milestone 2: growth checks (done)
 
-Add the checks of §2 as a configuration of their own (`GS_GROWTH_CHECKS`),
-on by default for wasm and runnable natively, so that the whole test suite
-covers them. A failed check aborts with the native overflow message, as
-it happens. This is what makes wasm64 builds memory-safe. Then measure the
-cost natively with the benchmark suite.
+`GS_GROWTH_CHECKS` (§2, recommendation 1): on by default in wasm64 builds,
+and natively with `-DGS_GROWTH_CHECKS=1`. The compiler writes the checks only
+into code built with it, so native builds without it are unchanged. A failed
+check ends the program with the native overflow message as the overrun
+happens, which is what makes wasm64 builds memory-safe for stacks that
+outgrow their partition.
+
+* **A limit beside each top.** `gs_stack` gains `lim`, which
+  `gs_reserve_region` sets `GS_GROW_SLACK` (64 KB, at most half the region)
+  short of the region's end under the checks, and at the end otherwise.
+* **Checked after, or before.** Most growth moves a top by a small constant
+  after writing at it. `Bump` checks the top against the limit after every
+  move (`GS_GROWN`): a step of at most 32 KB (`GROW_STEP`) cannot have
+  written past the slack. A write of a run-time or larger size is checked
+  before anything is written (`GS_ROOM`): copies and fills at a top, a
+  resize's fill, whole appends, received messages, `to_bytes` and
+  `from_bytes`, rendered text. A count times an element size is checked by
+  division (`GS_ROOM_ELEMS`), since the product of a count the program chose
+  can wrap. `gs_fmt_quoted`, at most two bytes per byte, is checked for its
+  worst case.
+* **The runtime** checks C's builder appends (`gs_bld_append`, in the
+  runtime and in `goose.h`, which prints and exits where a JIT run's library
+  has no runtime to call) before copying, and a slice pool's freelist after
+  each 512-byte node (`gs_top_grown`, by the region the top is in).
+  `from_bytes`'s scratch bitmap stays a `false` result, not an abort, when
+  the stack's limit cannot hold it.
+* **A missed check shows itself.** In a native build with the checks, the
+  slack means no checked growth can reach the guard gap, so a fault there is
+  a check the compiler left out: its report adds "no growth check stopped
+  it: a Goose bug". wasm64's gap scan at exit says the same.
+* **Tests.** `test/growth_checks.py` builds the seven programs of
+  `test/growth/` (pushes, a resize, whole appends, in-place text, a whole
+  array rendered and its `to_bytes`, records built field by field and copied,
+  `read_file` into a builder) natively with the checks: on a 256 KB stack
+  each is stopped by a check, and on the default stack each prints its
+  result. `test/wasm_target.py` builds the same programs as wasm64 and checks
+  that each is stopped before it prints. `run_tests.py --growth-checks`
+  compiles every fixture with the checks: with them, the whole suite passed
+  on Windows (2026-11-02), except `extern dylib`, which fails the same way
+  without them (its test library build passes `-fPIC` to clang on Windows).
+* **Cost, native** (clang-cl 19 `-O2`, best of 5, the middle size of
+  `bench/run_bench.py`): geometric mean ×1.028 over 18 benchmarks, worst
+  `graph_csr` ×1.16, `calc` ×1.10 and `graph` ×1.09, most within a few
+  percent. Every one printed the same output with and without the checks.
+* **Cost, wasm64** (Emscripten 6.0.13 under Node 24, the same runs, whole
+  process including Node's start of about 0.15 s): geometric mean ×1.024,
+  worst `graph_csr` ×1.10 and `particles` ×1.09.
+* **Not checked**, as natively: a worker restoring its copy of the globals,
+  which came from stacks with the same limits.
 
 ### Milestone 3: the browser
 

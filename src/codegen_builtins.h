@@ -229,6 +229,7 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
                     n = cat("(", nn, "->size - 8 - ", pre, ")");
                 }
                 L(cnt, " = *(gs_i64 *)(", nn, " + 1);");
+                RoomUnlessSmall(stk, cat(n));
                 L("GS_MEMCPY(", Top(stk), ", ", image, ", (size_t)", n, ");");
                 Bump(stk, n);
                 L("free(", nn, ");");
@@ -249,6 +250,7 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
                 if (poll) L("if (", nn, ") {");
                 else L("{");
                 ind++;
+                Room(stk, cat(nn, "->size"));
                 L("GS_MEMCPY(", Top(stk), ", ", nn, " + 1, (size_t)", nn, "->size);");
                 Bump(stk, cat(nn, "->size"));
                 L("free(", nn, ");");
@@ -257,6 +259,7 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
                     // A missed poll still yields a valid (zero) value.
                     L("} else {");
                     ind++;
+                    RoomUnlessSmall(stk, cat(MinBytes(t, true)));
                     L("GS_MEMZERO(", Top(stk), ", ", MinBytes(t, true), ");");
                     Bump(stk, cat(MinBytes(t, true)));
                     ind--;
@@ -384,6 +387,7 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
                 // is written once, after the fill.
                 string cur;
                 if (ak != A_LIMITED && !(relref && elem->ref->lenstorage == IS_VARINT)) {
+                    RoomElems(lv.stk, cat("(", nn, " - ", ol, ")"), esz);
                     cur = T();
                     L("uint8_t *", cur, " = ", Top(lv.stk), ";");
                 }
@@ -453,6 +457,7 @@ inline vector<string> CodeGen::EmitBuiltin(Call *c, Dst d0) {
             L("int64_t ", i, " = GS_IDX(", x, ", ", lv.lenlv, ", ", LocArgs(ln), ");");
             L("*(gs_i64 *)", Top(lv.flstk), " = ", i, ";");
             L(TopW(lv.flstk), " += 8;");
+            Grown(lv.flstk);
             L(lv.fl, ".len++;");
             return {};
         }
@@ -697,6 +702,8 @@ inline void CodeGen::EmitAppend(vector<Node *> &an, Line ln) {
             L("if (", ol, " + ", count, " > ", LimitedCap(lv), ") gs_abort(GS_E_CAPACITY, ",
               LocArgs(ln), ");");
             at = ElemAddr(v, ol);
+        } else {
+            RoomUnlessSmall(lv.stk, cat(count * FixedSize(elem)));
         }
         // The run is a fixed array of the literal's type laid over the slots.
         auto rt = CT(src->exprtype);
@@ -756,6 +763,8 @@ inline vector<string> CodeGen::EmitAlloc(Call *c, vector<Node *> &an, Line ln) {
     L("} else {");
     ind++;
     L(iv, " = ", lv.lenlv, ";");
+    // The fresh slot is written before the top moves over it.
+    RoomUnlessSmall(lv.stk, cat(esz));
     ind--;
     L("}");
     auto e = T();
@@ -765,6 +774,7 @@ inline vector<string> CodeGen::EmitAlloc(Call *c, vector<Node *> &an, Line ln) {
     ind++;
     L(lv.lenlv, "++;");
     L(TopW(lv.stk), " += ", esz, ";");
+    Grown(lv.stk);
     ind--;
     L("}");
     if (c->builtin == B_ALLOC_INDEX) return { iv };
@@ -929,6 +939,7 @@ inline void CodeGen::EmitRzImage(Loc src, TypeExpr *t, const string &stk, Line l
         auto th = FoTailHdr(t, src.s);
         EmitValStore(stk, ast.inttypes[IS_I64], cat(th, ".len"));
         auto pre = FoPrefixSize(t);
+        RoomUnlessSmall(stk, cat(pre));
         L("GS_MEMCPY(", Top(stk), ", &", src.s, ", ", pre, ");");
         Bump(stk, pre);
         EmitCopyElems(stk, FoTailArr(t)->arr->sub, cat(th, ".base"), cat(th, ".len"));
@@ -1024,6 +1035,7 @@ inline vector<string> CodeGen::EmitThreadSpawn(Call *c, vector<Node *> &an) {
                 auto &p = gpools[d];
                 auto flsz = FlEntrySize(d);
                 EmitValStore(stk, ast.inttypes[IS_I64], cat(p.first, ".len"));
+                Room(stk, cat(p.first, ".len * ", flsz));
                 L("GS_MEMCPY(", Top(stk), ", ", p.first, ".base, (size_t)(", p.first,
                   ".len * ", flsz, "));");
                 Bump(stk, cat(p.first, ".len * ", flsz));
@@ -1031,9 +1043,11 @@ inline vector<string> CodeGen::EmitThreadSpawn(Call *c, vector<Node *> &an) {
         } else if (IsBytesT(d->type)) {
             auto n = T();
             L("int64_t ", n, " = ", SizeX(d->type, lv.s), ";");
+            RoomUnlessSmall(stk, cat(n));
             L("GS_MEMCPY(", Top(stk), ", ", lv.s, ", (size_t)", n, ");");
             Bump(stk, n);
         } else {
+            RoomUnlessSmall(stk, cat(FixedSize(d->type)));
             L("GS_MEMCPY(", Top(stk), ", &", lv.s, ", ", FixedSize(d->type), ");");
             Bump(stk, cat(FixedSize(d->type)));
         }
@@ -1232,6 +1246,7 @@ inline void CodeGen::AppendBytes(const Loc &lv, const string &src, const string 
         L(v.lenlv, " = (", LenCast(lv), ")(", ol, " + ", n, ");");
         return;
     }
+    RoomUnlessSmall(lv.stk, n);
     L(CopyFn(), "(", Top(lv.stk), ", ", src, ", (size_t)", n, ");");
     Bump(lv.stk, n);
     L(v.lenlv, " += ", n, ";");
@@ -1307,8 +1322,10 @@ inline vector<string> CodeGen::EmitToBytes(vector<Node *> &an, Dst d0, Line ln) 
         return {};
     }
     auto rd = OpenRzDest(GrowU8(), d0, ln, "to_bytes");
+    RoomUnlessSmall(rd.stk, cat(pn));
     L("GS_MEMCPY(", Top(rd.stk), ", ", pfx, ", (size_t)", pn, ");");
     Bump(rd.stk, pn);
+    RoomUnlessSmall(rd.stk, sz);
     L(CopyFn(), "(", Top(rd.stk), ", ", src, ", (size_t)", sz, ");");
     Bump(rd.stk, sz);
     auto tot = T();
@@ -1354,6 +1371,10 @@ inline vector<string> CodeGen::EmitFromBytes(Call *c, vector<Node *> &an, Dst d0
         auto bn = T();
         L("int64_t ", bn, " = (", pn, " + 7) / 8;");
         L("if (", bn, " > GS_BM_MAX) { ", bn, " = 0; ", ok, " = 0; }");
+        // Under growth checks the stack's limit says what it reserves.
+        if (growthchecks)
+            L("if (", bn, " > (int64_t)(", bstk, "->lim - ", Top(bstk), ")) { ", bn, " = 0; ", ok,
+              " = 0; }");
         L("GS_MEMZERO(", bm, ", (size_t)", bn, ");");
         Bump(bstk, bn);
     }
@@ -1363,6 +1384,7 @@ inline vector<string> CodeGen::EmitFromBytes(Call *c, vector<Node *> &an, Dst d0
     auto rd = OpenRzDest(t, d0, ln, "from_bytes");
     L("if (", ok, ") {");
     ind++;
+    RoomUnlessSmall(rd.stk, cat(pn));
     L("GS_MEMCPY(", Top(rd.stk), ", ", pay, ", (size_t)", pn, ");");
     Bump(rd.stk, pn);
     ind--;

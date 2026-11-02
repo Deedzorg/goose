@@ -181,6 +181,9 @@ static char **gs_argv;
    the usable part as configured, for the reports; and the page size, a
    whole number of which the usable part always is (gs_rt_start). */
 static size_t gs_region_usable, gs_region_gap, gs_region_reserve, gs_region_page;
+/* How far short of its region's end a stack's limit stops: GS_GROW_SLACK in
+   a program built with growth checks (gs_rt_start), else none. */
+static size_t gs_grow_slack;
 /* The worker running on this thread, main's being -1 (runtime_threads.h). */
 static GS_TLS int64_t gs_current_thread_id = -1;
 /* The program's address space budget for regions and the most regions its
@@ -239,10 +242,11 @@ static char *gs_text(char *p, const char *s) {
 }
 
 /* The report of a data stack overrunning its region into the guard gap,
-   for one write from the fault handler: whose stacks, past how much, and
-   what raises it. Fits GS_OVERFLOW_TEXT. */
-#define GS_OVERFLOW_TEXT 320
-static size_t gs_overflow_text(char *buf, const gs_region *r) {
+   for one write from the fault handler, or a growth check that failed
+   (`checked`): whose stacks, past how much, and what raises it. Fits
+   GS_OVERFLOW_TEXT. */
+#define GS_OVERFLOW_TEXT 400
+static size_t gs_overflow_text(char *buf, const gs_region *r, int checked) {
     char *p = gs_text(buf, "goose runtime error: data stack overflow: a value on ");
     if (gs_current_thread_id < 0) {
         p = gs_text(p, "main's");
@@ -260,7 +264,11 @@ static size_t gs_overflow_text(char *buf, const gs_region *r) {
         p = gs_text(p, " when the platform ran out of address space)");
     }
     p = gs_text(p, "; --stack-reserve or -DGS_STACK_RESERVE raises the reservation, "
-                   "up to 256 TB\n");
+                   "up to 256 TB");
+    /* In a program built with growth checks, an overrun no check stopped is
+       a compiler or runtime bug. */
+    if (gs_grow_slack && !checked) p = gs_text(p, " (no growth check stopped it: a Goose bug)");
+    *p++ = '\n';
     return (size_t)(p - buf);
 }
 
@@ -343,7 +351,7 @@ static LONG WINAPI gs_fault_filter(EXCEPTION_POINTERS *ep) {
             }
             char msg[GS_OVERFLOW_TEXT];
             DWORD written;
-            WriteFile(GetStdHandle(STD_ERROR_HANDLE), msg, (DWORD)gs_overflow_text(msg, r),
+            WriteFile(GetStdHandle(STD_ERROR_HANDLE), msg, (DWORD)gs_overflow_text(msg, r, 0),
                       &written, NULL);
             ExitProcess(1);
         }
@@ -438,7 +446,7 @@ static void gs_fault_handler(int sig, siginfo_t *info, void *ctx) {
         gs_region *r = &gs_regions[i];
         if ((uintptr_t)hit - (uintptr_t)r->base < r->size) {
             char msg[GS_OVERFLOW_TEXT];
-            ssize_t w = write(2, msg, gs_overflow_text(msg, r));
+            ssize_t w = write(2, msg, gs_overflow_text(msg, r, 0));
             (void)w;
             _exit(1);
         }
@@ -570,7 +578,7 @@ static int gs_gaps_overrun(void) {
         for (const uint8_t *p = r->base + r->usable; p < r->base + r->size; p++) {
             if (*p) {
                 char msg[GS_OVERFLOW_TEXT];
-                ssize_t w = write(2, msg, gs_overflow_text(msg, r));
+                ssize_t w = write(2, msg, gs_overflow_text(msg, r, 0));
                 (void)w;
                 return 1;
             }
@@ -671,7 +679,36 @@ GS_API uint8_t *gs_reserve_region(gs_stack *stack) {
     gs_regions[i].stack = stack;
     gs_regions[i].committed = p;
     gs_nregions = i + 1;  /* Publish only the initialized entry. */
+    size_t slack = gs_grow_slack < usable / 2 ? gs_grow_slack : usable / 2;
+    stack->lim = p + usable - slack;
     return p;
+}
+
+/* A growth check that failed (GS_GROWN, GS_ROOM): the report a fault in the
+   stack's guard gap gives. */
+GS_API GS_NORETURN void gs_grow_fail(const gs_stack *s) {
+    for (long i = 0; i < gs_nregions; i++) {
+        if (gs_regions[i].stack == s) {
+            char msg[GS_OVERFLOW_TEXT];
+            size_t n = gs_overflow_text(msg, &gs_regions[i], 1);
+            fwrite(msg, 1, n, stderr);
+            gs_end(1);
+        }
+    }
+    gs_panic("data stack overflow");
+}
+
+/* The stack whose region holds `top`, which a slice pool's freelist moved
+   up, checked as GS_GROWN checks generated code's tops: the freelist
+   helpers take a top, not its stack. */
+static void gs_top_grown(const uint8_t *top) {
+    for (long i = 0; i < gs_nregions; i++) {
+        const gs_region *r = &gs_regions[i];
+        if ((uintptr_t)(top - 1) - (uintptr_t)r->base < r->size) {
+            if (top > r->stack->lim) gs_grow_fail(r->stack);
+            return;
+        }
+    }
 }
 
 /* Explicit rather than on every rewind: short-lived scratch can reuse its
@@ -780,6 +817,7 @@ static int64_t gs_sp_newnode(gs_sppath *p) {
         return i;
     }
     *p->top += GS_SPAN_NODE;
+    gs_top_grown(*p->top);
     return (*p->n)++;
 }
 
@@ -1490,8 +1528,10 @@ GS_API int64_t gs_scan_pair(const uint8_t *p, int64_t n, const void *a, int64_t 
 }
 
 GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t gap,
-                        uint64_t budget, int64_t mainregions, int64_t workerregions) {
+                        uint64_t budget, int64_t mainregions, int64_t workerregions,
+                        int growthchecks) {
     gs_argc = argc;
+    gs_grow_slack = growthchecks ? GS_GROW_SLACK : 0;
     gs_argv = argv;
     /* A region's usable part is whole pages: the guard gap behind it has to
        start on a page to be protected, and on Windows a stack would run on

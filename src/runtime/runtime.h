@@ -132,6 +132,16 @@ typedef double gs_f64 GS_ALIGN1;
 #ifndef GS_STACK_STATS
 #define GS_STACK_STATS 0    /* 1: each thread program reports its stack use as it ends. */
 #endif
+/* 1: growth is checked against each stack's limit as it happens, where no
+   guard gap faults (docs/design/wasm.md §2): on by default for WebAssembly,
+   and the compiler writes the checks only into code built with it. */
+#ifndef GS_GROWTH_CHECKS
+#ifdef __EMSCRIPTEN__
+#define GS_GROWTH_CHECKS 1
+#else
+#define GS_GROWTH_CHECKS 0
+#endif
+#endif
 /* §10.4 caps a stack reservation at 2^48 bytes, which is what lets the
    compiler treat every size, count and index as fitting in 48 bits: the
    guard region enforces it, so no growth path needs its own check. */
@@ -894,6 +904,11 @@ static uint64_t gs_f2uchk(double d, int f32, const char *file, int line) {
 
 typedef struct {
     uint8_t *top;
+    /* Past which growth checks stop the stack (GS_GROWTH_CHECKS): its
+       region's end, or GS_GROW_SLACK bytes short of it in a program built
+       with the checks, so that a top moved up by that much at most can be
+       checked after the move. */
+    uint8_t *lim;
 } gs_stack;
 
 /* The program defines what goose.h gives C compiled on its own (gs_stack
@@ -907,7 +922,29 @@ typedef struct {
    main program and any one worker hold (the compiler's static counts),
    which size their registries and give hardware_threads() its cap. */
 GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t gap,
-                        uint64_t budget, int64_t mainregions, int64_t workerregions);
+                        uint64_t budget, int64_t mainregions, int64_t workerregions,
+                        int growthchecks);
+
+/* Growth checks (GS_GROWTH_CHECKS): what the compiler writes after a top
+   moved up by at most GS_GROW_SLACK / 2 bytes (GS_GROWN), and before
+   writing n bytes, or n elements of esz bytes, at a top (GS_ROOM,
+   GS_ROOM_ELEMS). A failed one ends the program as a guard gap fault does. */
+#define GS_GROW_SLACK (64u << 10)
+GS_API GS_NORETURN void gs_grow_fail(const gs_stack *s);
+#if defined(__GNUC__) || defined(__clang__)
+#define GS_GROW_FAILS(c) __builtin_expect(!!(c), 0)
+#else
+#define GS_GROW_FAILS(c) (c)
+#endif
+#define GS_GROWN(s, top) \
+    do { if (GS_GROW_FAILS((uint8_t *)(top) > (s)->lim)) gs_grow_fail(s); } while (0)
+#define GS_ROOM(s, top, n) \
+    do { if (GS_GROW_FAILS((int64_t)((s)->lim - (uint8_t *)(top)) < (int64_t)(n))) \
+             gs_grow_fail(s); } while (0)
+#define GS_ROOM_ELEMS(s, top, n, esz) \
+    do { if (GS_GROW_FAILS((uint8_t *)(top) > (s)->lim || \
+                           (uint64_t)(n) > (uint64_t)((s)->lim - (uint8_t *)(top)) / (esz))) \
+             gs_grow_fail(s); } while (0)
 /* A fresh region, registered to the calling thread program. */
 GS_API uint8_t *gs_reserve_region(gs_stack *stack);
 /* The calling thread program's stack use, on stderr (GS_STACK_STATS):
@@ -1017,7 +1054,7 @@ static void gs_stack_block(int64_t n) {
 static void gs_rt_init(int argc, char **argv, int64_t mainstacks, int64_t mainregions,
                        int64_t workerregions) {
     gs_rt_start(argc, argv, GS_STACK_RESERVE, GS_STACK_GAP, GS_STACK_BUDGET, mainregions,
-                workerregions);
+                workerregions, GS_GROWTH_CHECKS);
     gs_stack_block(mainstacks);
 }
 

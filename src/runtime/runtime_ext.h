@@ -21,6 +21,8 @@ typedef struct { uint8_t *data; int64_t len; } sl_u8;
    the header's count grows. */
 static void gs_bld_append(gs_rref b, const void *p, int64_t n) {
     if (n <= 0) return;
+    /* As GS_ROOM: C can append any amount, so before the copy. */
+    if (b.stk->lim && (int64_t)(b.stk->lim - b.stk->top) < n) gs_grow_fail(b.stk);
     memcpy(b.stk->top, p, (size_t)n);
     b.stk->top += n;
     b.hdr->len += n;

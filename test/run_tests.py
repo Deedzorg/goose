@@ -131,6 +131,11 @@ def front_args(line, bce):
                               ["--check"] + (["-O1", "--bce-test"] if bce else []))
 
 
+# -D every compile of every fixture gets: --growth-checks puts
+# GS_GROWTH_CHECKS=1 here (docs/design/wasm.md §2).
+EXTRA_DEFINES = []
+
+
 def runtime_defines(source):
     """The -D a fixture's first line asks every compile of it for."""
     source = Path(source)
@@ -505,8 +510,8 @@ class Runner:
         # after the command where the arguments start with one.
         args = [str(a) for a in args]
         verb = args[:1] if args and not args[0].startswith("-") and len(args) > 1 else []
-        return ([self.exe] + verb + ["--stats"] + ["-D" + d for d in runtime_defines(args[-1])] +
-                args[len(verb):])
+        return ([self.exe] + verb + ["--stats"] +
+                ["-D" + d for d in EXTRA_DEFINES + runtime_defines(args[-1])] + args[len(verb):])
 
     def screened(self, what, result):
         """A compiler run's result, failing the current piece of work if the
@@ -545,7 +550,8 @@ class Runner:
         as theirs. A batch that exits with an error after every mark, or
         prints anything after the last one (a leak report), gets through
         none."""
-        argv = [self.exe, "--multi-test", "--stats"] + [str(a) for a in args] + [str(f) for f in files]
+        argv = ([self.exe, "--multi-test", "--stats"] + ["-D" + d for d in EXTRA_DEFINES] +
+                [str(a) for a in args] + [str(f) for f in files])
         code, out, err = tc.run_capture(argv)
         outs, outrest = split_multi(out, files)
         errs, errrest = split_multi(err, files)
@@ -1344,6 +1350,9 @@ def main():
                     help="fail if the baseline's second C-front-end check is unavailable")
     ap.add_argument("--no-jit", action="store_true",
                     help="skip the in-process TinyCC runs even where they are available")
+    ap.add_argument("--growth-checks", action="store_true",
+                    help="compile every fixture with -DGS_GROWTH_CHECKS=1, the checks wasm64 "
+                         "builds have (docs/design/wasm.md)")
     ap.add_argument("--goose-in-goose-only", action="store_true",
                     help="run only the multi-stage Goose-written compiler regression")
     ap.add_argument("-j", "--jobs", type=int, default=default_jobs(),
@@ -1361,6 +1370,8 @@ def main():
                     help="print a line for every check that passed, not only each "
                          "section's count of them")
     args = ap.parse_args()
+    if args.growth_checks:
+        EXTRA_DEFINES.append("GS_GROWTH_CHECKS=1")
 
     if args.nocgen and (args.cc or args.require_clang or args.profile != "baseline"):
         ap.error("--nocgen cannot be combined with a required toolchain or sanitizer profile")
@@ -1474,9 +1485,10 @@ def main():
 
     # One level of category directories; nested syntax helpers and the modules
     # of the goose_in_goose bootstrap are exercised through their entry points.
-    # The lsp/ fixtures are the language server's, driven by lsp_protocol.py.
+    # The lsp/ fixtures are the language server's, driven by lsp_protocol.py,
+    # and growth/'s run on small stacks, driven by growth_checks.py.
     tests = [f for f in sorted(HERE.glob("*/*.goose"))
-             if f.parent.name not in ("errors", "errors_tc", "goose_in_goose", "lsp") and
+             if f.parent.name not in ("errors", "errors_tc", "goose_in_goose", "lsp", "growth") and
              f.name != "lexer_tokens.goose"]
     if len({f.stem for f in tests}) != len(tests):
         ap.error("fixture names must be unique across categories (shared expected/ and build outputs)")
@@ -2347,6 +2359,17 @@ def main():
     if cc:
         r.show_task(extern_dylib)
 
+    def growth_checks():
+        from growth_checks import check_growth
+        try:
+            n = check_growth(exe, gendir)
+            r.ok(f"growth checks: {n} programs grown past a 256 KB stack are stopped by a check, "
+                 "and run to the end on the default one")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("growth checks", str(e))
+    if cc:
+        r.show_task(growth_checks)
+
     def wasm_target():
         from wasm_target import check_wasm_target
         try:
@@ -2355,7 +2378,7 @@ def main():
                 r.say(f"skip wasm64 target ({skipped})")
             else:
                 r.ok("wasm64 target: samples built with Emscripten print under Node what they "
-                     "print natively, a stack overrun is reported at exit, threads refused")
+                     "print natively, growth checks stop overruns in time, threads refused")
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             r.fail("wasm64 target", str(e))
     r.show_task(wasm_target)

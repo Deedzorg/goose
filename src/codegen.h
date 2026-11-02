@@ -1044,7 +1044,39 @@ struct CodeGen {
     // top, bumping it. All branches of value-producing control constructs
     // construct to the same destination; calls pass the stack down.
 
-    void Bump(const string &stk, const string &n) { L(TopW(stk), " += ", n, ";"); }
+    void Bump(const string &stk, const string &n) {
+        L(TopW(stk), " += ", n, ";");
+        Grown(stk);
+    }
+
+    // Growth checks (GS_GROWTH_CHECKS, docs/design/wasm.md §2), for
+    // platforms with no guard pages behind the stacks. Each stack's limit
+    // stops GS_GROW_SLACK bytes short of its region's end, so a top moved up
+    // by at most that much is checked after the move (Grown): the writes it
+    // made stay inside the region. A larger or a run-time amount is checked
+    // before anything is written (Room).
+    bool growthchecks = false;
+    static constexpr int64_t GROW_STEP = 32 << 10;   // GS_GROW_SLACK / 2, for small regions.
+    void Grown(const string &stk) {
+        if (growthchecks) L("GS_GROWN(", stk, ", ", Top(stk), ");");
+    }
+    void Room(const string &stk, const string &n) {
+        if (growthchecks) L("GS_ROOM(", stk, ", ", Top(stk), ", ", n, ");");
+    }
+    // Room for n bytes unless n is a constant no larger than GROW_STEP,
+    // which Grown after the bump covers.
+    void RoomUnlessSmall(const string &stk, const string &n) {
+        if (!growthchecks) return;
+        if (!n.empty() && n.find_first_not_of("0123456789") == string::npos && n.size() < 10 &&
+            stoll(n) <= GROW_STEP)
+            return;
+        Room(stk, n);
+    }
+    // Room for n elements of esz bytes each, without multiplying: a count
+    // the program chose can make n * esz wrap.
+    void RoomElems(const string &stk, const string &n, int64_t esz) {
+        if (growthchecks && esz > 0) L("GS_ROOM_ELEMS(", stk, ", ", Top(stk), ", ", n, ", ", esz, ");");
+    }
 
     void EmitValStore(const string &stk, TypeExpr *t, const string &x);
     void StoreWhole(const string &p, TypeExpr *t, const string &x);
@@ -1449,8 +1481,10 @@ struct CodeGen {
     // process state that the driver must install before constructing us.
     // A function the extern support declares gets no prototype here.
     CodeGen(Ast &_ast, string_view runtime_ext_text, const vector<string> &headers,
-            bool _norfcheck = false, bool _library = false, int64_t _maxstacks = 0)
+            bool _norfcheck = false, bool _library = false, int64_t _maxstacks = 0,
+            bool _growthchecks = false)
         : ast(_ast), library(_library), norfcheck(_norfcheck), maxstacks(_maxstacks) {
+        growthchecks = _growthchecks;
         for (auto t : ast.alltypes)
             if (t->kind == TY_REF && t->ref->pool) poolglobals.insert(t->ref->pool);
         ComputeRelRootMax();

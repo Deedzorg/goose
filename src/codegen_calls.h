@@ -432,6 +432,7 @@ inline void CodeGen::EmitReprefix(FnSpec *sp, const Dst &dd, const string &base,
       base, " - ", oms, "));");
     L(writepref);
     L(TopW(dd.s), " += ", ms, " - ", oms, ";");
+    Grown(dd.s);
 }
 
 inline void CodeGen::EmitRfCheck(FnSpec *callee) {
@@ -609,6 +610,7 @@ inline vector<string> CodeGen::EmitDispatch(Call *c, Dst d0, vector<Dst> *alldst
                 copied = BytesTemp(stk);
                 auto sz = T();
                 L("int64_t ", sz, " = ", SizeX(enumtype, p), ";");
+                RoomUnlessSmall(stk, cat(sz));
                 L("GS_MEMCPY(", Top(stk), ", ", p, ", (size_t)", sz, ");");
                 Bump(stk, sz);
             } else {

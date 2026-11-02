@@ -752,7 +752,8 @@ R"(  --cc name|path        The C compiler: msvc, clang-cl, clang, gcc, cc or a
   --target wasm64       Build 64-bit WebAssembly with Emscripten (EMSDK, emcc
                         on PATH, or --cc): prog.js and prog.wasm, which
                         `node prog.js` runs. No threads or gfx yet; data
-                        stacks get 64 MB each (--stack-reserve changes it).
+                        stacks get 64 MB each (--stack-reserve changes it),
+                        with their growth checked (GS_GROWTH_CHECKS).
   -v                    Print each command the build runs and what it prints.
   --dry-run             Print the commands the build would run, and run none.
 )");
@@ -1521,6 +1522,9 @@ int Main(int argc, char **argv) {
         auto reserved = false;
         for (auto &d : cdefines) reserved |= d.rfind("GS_STACK_RESERVE", 0) == 0;
         if (buildopts.Wasm() && !reserved) cdefines.push_back("GS_STACK_RESERVE=(64ull << 20)");
+        auto checked = false;
+        for (auto &d : cdefines) checked |= d.rfind("GS_GROWTH_CHECKS", 0) == 0;
+        if (buildopts.Wasm() && !checked) cdefines.push_back("GS_GROWTH_CHECKS=1");
     }
     if (!target.empty() && verb != "build") {
         fprintf(stderr, "--target is for goose build\n");
@@ -1695,7 +1699,15 @@ int Main(int argc, char **argv) {
         for (auto &rf : runtime_files)
             if (string_view(rf.name) == "runtime_ext.h") runtime_ext_text = rf.text;
         auto stackcfg = StackConfigOf(cdefines);
-        CodeGen cg(ast, runtime_ext_text, includes, norfcheck, library, stackcfg.maxstacks);
+        // Growth checks (docs/design/wasm.md §2): wasm64's default, or asked
+        // for with -DGS_GROWTH_CHECKS=1, which the C sees as well.
+        auto growthchecks = false;
+        for (auto &d : cdefines) {
+            if (d == "GS_GROWTH_CHECKS=1" || d == "GS_GROWTH_CHECKS") growthchecks = true;
+            if (d == "GS_GROWTH_CHECKS=0") growthchecks = false;
+        }
+        CodeGen cg(ast, runtime_ext_text, includes, norfcheck, library, stackcfg.maxstacks,
+                   growthchecks);
         if (stacks) cg.StackReport(msgs, stackcfg);
         // The packages whose native parts the program needs, which a JIT
         // run takes functions from and a build links: its own, when it has

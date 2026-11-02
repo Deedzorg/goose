@@ -1,8 +1,8 @@
-"""`goose build --target wasm64` (docs/design/wasm.md, milestone 1): samples
+"""`goose build --target wasm64` (docs/design/wasm.md, milestones 1 and 2): samples
 built as 64-bit WebAssembly with Emscripten and run under Node print what
-their native builds print, files and standard input included; a data stack
-that outgrows its fixed slice of linear memory is reported as the program
-ends, with exit code 1; and what the target cannot do yet (threads, a
+their native builds print, files and standard input included; the growth
+checks stop a data stack that outgrows its fixed slice of linear memory as
+it does (test/growth's programs); and what the target cannot do yet (threads, a
 --target outside goose build, an unknown target) is refused with a message.
 Skipped where Emscripten (EMSDK, or emcc on PATH) or Node is missing."""
 import os
@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 import toolchain as tc
+from growth_checks import GROWTH, WAD, check_overflow
 
 SAMPLES = tc.REPO_ROOT / "samples"
 
@@ -82,15 +83,15 @@ def check_wasm_target(exe, gendir):
             raise RuntimeError(f"{stem} as wasm64 (exit {r.returncode}) does not print "
                                f"expected/{name}.out:\n{_text(r)[:2000]}")
 
-    # The vector outgrows a 256 KB stack: native builds abort as it does,
-    # wasm64 at the end; with the default 64 MB it fits.
+    # Growth checks are on in wasm64 builds: each program of test/growth that
+    # outgrows a 256 KB stack is stopped as it does, before it prints, as
+    # native builds stop at the guard gap; with the default 64 MB it fits.
+    for prog in sorted(GROWTH.glob("*.goose")):
+        js = work / f"growth_{prog.stem}.js"
+        _build(exe, prog, js, ["--stack-reserve", "256K"])
+        check_overflow(prog.stem, _run(["node", str(js), str(WAD)]), "as wasm64 on a 256 KB stack")
     src = work / "overrun.goose"
     src.write_text(OVERRUN)
-    _build(exe, src, work / "overrun.js", ["--stack-reserve", "256K"])
-    r = _run(["node", str(work / "overrun.js")])
-    if r.returncode != 1 or "data stack overflow" not in tc.decode(r.stderr):
-        raise RuntimeError(f"an overrun of a 256 KB stack was not reported (exit {r.returncode}):\n"
-                           f"{_text(r)}")
     _build(exe, src, work / "fits.js")
     r = _run(["node", str(work / "fits.js")])
     if r.returncode != 0 or tc.decode(r.stdout).strip() != "300000":

@@ -50,6 +50,7 @@ inline bool CodeGen::SimpleText(Call *c, TypeExpr *t) {
 }
 
 inline void CodeGen::RenderLit(Loc &out, const string &text) {
+    RoomUnlessSmall(out.stk, cat(text.size()));
     L("GS_MEMCPY(", Top(out.stk), ", ", StrRaw(text), ", ", text.size(), ");");
     Bump(out.stk, cat(text.size()));
     L(out.lenlv, " += ", text.size(), ";");
@@ -141,11 +142,14 @@ inline void CodeGen::RenderLoc(Loc &out, Loc lv, TypeExpr *t, bool nested, Call 
             auto v = ArrayView(lv);
             if (IsU8(elem)) {
                 if (nested) {
+                    // Quoted: at most two bytes a byte, and the quotes.
+                    RoomElems(out.stk, cat("(", v.len, ") + 1"), 2);
                     RenderN(out, cat("gs_fmt_quoted(", Top(out.stk), ", (const uint8_t *)(",
                                      v.elems, "), ", v.len, ")"));
                 } else {
                     auto n = T();
                     L("int64_t ", n, " = ", v.len, ";");
+                    RoomUnlessSmall(out.stk, n);
                     L(CopyFn(), "(", Top(out.stk), ", (const uint8_t *)(", v.elems,
                       "), (size_t)", n, ");");
                     Bump(out.stk, n);
@@ -560,10 +564,12 @@ inline vector<string> CodeGen::EmitStr(Call *c, vector<Node *> &an, Dst d0, Line
         if (!SimpleText(context, t)) {
             auto b = RenderToTemp(a, context);
             L("int64_t ", n, " = ", b.hdr, ".len;");
+            RoomUnlessSmall(stk, cat(n));
             L("GS_MEMCPY(", Top(stk), ", ", b.hdr, ".base, (size_t)", n, ");");
         } else if (t->kind == TY_ARRAY || t->kind == TY_SLICE) {
             auto se = GenSrcElems(a);
             L("int64_t ", n, " = ", se.n, ";");
+            RoomUnlessSmall(stk, n);
             L(CopyFn(), "(", Top(stk), ", (const uint8_t *)(", se.elems, "), (size_t)",
               n, ");");
         } else {

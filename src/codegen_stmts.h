@@ -1022,6 +1022,7 @@ inline void CodeGen::EmitPrefixPatch(const string &pref, IntStorage ls, const st
       elems, ")));");
     L("GS_MEMCPY(", pref, ", ", tmp, ", (size_t)", ms, ");");
     L(TopW(stk), " += ", ms, " - 1;");
+    Grown(stk);
     ind--;
     L("}");
 }
