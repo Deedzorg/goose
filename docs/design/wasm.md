@@ -15,9 +15,10 @@
 
 </details>
 
-Milestones 1 and 2 of the plan in [§8](#8-status-and-staged-plan) are
+Milestones 1 to 3 of the plan in [§8](#8-status-and-staged-plan) are
 implemented on the fork branch `feature/wasm`: `goose build --target wasm64`
-with fixed partitions, and the growth checks of §2 (`GS_GROWTH_CHECKS`). The
+with fixed partitions, the growth checks of §2 (`GS_GROWTH_CHECKS`), and
+`--target wasm64-web` with a page that runs the program in a browser. The
 rest is a proposal. Spec §10.4 says that platforms
 without address-space reservation fall back to "index-based references +
 bounds-checked growth", and leaves the details open (open issue 15). This
@@ -306,15 +307,38 @@ outgrow their partition.
 * **Not checked**, as natively: a worker restoring its copy of the globals,
   which came from stacks with the same limits.
 
-### Milestone 3: the browser
+### Milestone 3: the browser (done)
 
-* `--target wasm64-web`: `-sENVIRONMENT=web`, MEMFS instead of NODERAWFS,
-  `print` to a page element or the console, and a small HTML loader page
-  written beside `prog.js`. `goose build` could also serve it locally for a
-  quick look.
-* Files: preload a directory (`--embed-dir`) and let a page hand files in.
-* Test: a headless browser run in CI where one is available, else Node with
-  the web build's JavaScript.
+```
+goose build --target wasm64-web --web-files data prog.goose   # prog.js, .wasm, .html, .data
+python -m http.server                                         # then open prog.html
+```
+
+* **The build** (build.h): `-sENVIRONMENT=web -sMODULARIZE=1
+  -sEXPORT_NAME=gooseProgram`, with the same memory, stack, growth checks
+  and runtime object as `wasm64`. Files live in Emscripten's memory file
+  system: `--web-files dir[@to]` packs a directory into it
+  (`--preload-file`, `prog.data` beside the page) for a program that reads
+  files, at the same relative path by default, so `--web-files data` lets
+  `data/alice.txt` open as it does natively.
+* **The page** (`prog.html`, from `web_page.h`): boxes for the arguments
+  (split as a shell splits them) and standard input, a Run button, the
+  output with standard error in red, and the exit code and time. Every run
+  calls `gooseProgram` again, a fresh instance, as a new process would be.
+  `?run` runs it as the page opens, and `?args=[...]` and `?stdin=...` fill
+  the boxes, so a link can show a program running. Light and dark follow
+  the system. A page opened from `file://` cannot load the module, and says
+  to serve the folder over http.
+* **Test:** `test/wasm_web.py`, run by `test/run_tests.py`: pages for the
+  tour, `word_freq` (files from `--web-files data`), `calc` (standard input)
+  and an overrun of a 256 KB stack, served from a local server and opened in
+  headless Chrome or Edge (`GOOSE_TEST_BROWSER` names another). Each runs
+  as it opens and, with `?test-report`, posts its output and exit code back
+  to the server, which compares them with `samples/expected/`; the overrun
+  must be stopped by a growth check. Skipped without Emscripten or such a
+  browser. Passes on Windows with Chrome 156 (about 20 s).
+* **Not yet:** no page can hand the program a file of the viewer's own, and
+  `goose build` does not serve the page itself; both are small additions.
 
 ### Milestone 4: more of the language and the libraries
 

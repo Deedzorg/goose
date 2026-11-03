@@ -2383,6 +2383,19 @@ def main():
             r.fail("wasm64 target", str(e))
     r.show_task(wasm_target)
 
+    def wasm_web():
+        from wasm_web import check_wasm_web
+        try:
+            skipped = check_wasm_web(exe, gendir)
+            if skipped:
+                r.say(f"skip wasm64-web target ({skipped})")
+            else:
+                r.ok("wasm64-web target: pages for samples, with arguments, files and input, "
+                     "print in a headless browser what they print natively; overruns stopped")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("wasm64-web target", str(e))
+    r.show_task(wasm_web)
+
     def resource_paths():
         from resource_paths import check_resource_paths
         try:

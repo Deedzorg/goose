@@ -158,6 +158,8 @@ beyond those in [§5](#5-options-for-run-build-and-check):
 | `--cc name\|path` | The C compiler, as above. |
 | `--standalone` | Compile the runtime into the program, rather than linking the runtime object built once per C compiler. |
 | `--target wasm64` | Build 64-bit WebAssembly with Emscripten (`EMSDK`, `emcc` on PATH, or `--cc`): `prog.js` and `prog.wasm`, which `node prog.js` runs. No threads or packages with native parts yet; each data stack gets 64 MB unless `--stack-reserve` says otherwise ([design/wasm.md](design/wasm.md#8-status-and-staged-plan)). `--target native` is the default. |
+| `--target wasm64-web` | The same for a browser: `prog.js`, `prog.wasm` and `prog.html`, a page that runs the program with arguments and standard input from boxes. Serve the folder over http (`python -m http.server`) and open the page. |
+| `--web-files dir[@to]` | With `--target wasm64-web`: pack a directory into the page's files (at `to`, else at `dir`), for a program that reads files. |
 | `-v` | Print each command the build runs, and what it prints. |
 | `--dry-run` | Print the commands the build would run, with their paths, and run none of them. A Makefile or CMake project can take them from here. |
 
@@ -212,7 +214,7 @@ The `-D` macros that the runtime reads, which configure a program:
 |---|---|---|
 | `GS_DEBUG` | 0 | 1 is what `--debug` sets: the overflow, range and tag checks. |
 | `GS_STACK_STATS` | 0 | 1 makes each thread program report its data stack use on stderr as it ends. |
-| `GS_GROWTH_CHECKS` | 0 (1 for `--target wasm64`) | 1 checks each data stack's growth against its reservation as it happens, where no guard gap faults ([design/wasm.md](design/wasm.md#8-status-and-staged-plan)); natively it costs a few percent. |
+| `GS_GROWTH_CHECKS` | 0 (1 for `--target wasm64` and `wasm64-web`) | 1 checks each data stack's growth against its reservation as it happens, where no guard gap faults ([design/wasm.md](design/wasm.md#8-status-and-staged-plan)); natively it costs a few percent. |
 | `GS_STACK_RESERVE` | 2 GB | The address space reserved per data stack, which `--stack-reserve` sets. |
 | `GS_STACK_GAP` | 1 MB | The unmapped gap after each data stack, which makes runaway growth abort. |
 | `GS_STACK_BUDGET` | 32 TB | The address space all thread programs together are meant to take; `hardware_threads()` is capped at what it has room for. |

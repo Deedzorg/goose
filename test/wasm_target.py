@@ -101,7 +101,10 @@ def check_wasm_target(exe, gendir):
         ([str(exe), "build", "--target", "wasm64", str(SAMPLES / "23_mandelbrot_threads.goose"),
           "-o", str(work / "threads.js")], "does not support threads"),
         ([str(exe), "run", "--target", "wasm64", str(src)], "--target is for goose build"),
-        ([str(exe), "build", "--target", "wasm32", str(src)], "--target takes native or wasm64"),
+        ([str(exe), "build", "--target", "wasm32", str(src)],
+         "--target takes native, wasm64 or wasm64-web"),
+        ([str(exe), "build", "--target", "wasm64", "--web-files", "data", str(src)],
+         "--web-files is for --target wasm64-web"),
     ]
     for argv, says in refusals:
         r = _run(argv)

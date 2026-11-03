@@ -20,6 +20,7 @@ add_executable(goose
     src/buildfile.h
     src/toolchain.h
     src/build.h
+    src/web_page.h
     src/packages.h
     src/json.h
     src/native.h

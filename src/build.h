@@ -18,9 +18,11 @@ struct BuildOptions {
     bool dryrun = false;      // --dry-run: print the commands and run nothing
     bool standalone = false;  // --standalone: no runtime object
     string exe;               // -o: the executable; "" puts it beside the root source
-    string target;            // --target: "" for this machine, or wasm64 (Emscripten)
+    string target;            // --target: "" for this machine, wasm64 or wasm64-web (Emscripten)
+    vector<string> webfiles;  // --web-files: directories (src[@dst]) a web page's files hold
 
-    bool Wasm() const { return target == "wasm64"; }
+    bool Wasm() const { return target == "wasm64" || Web(); }
+    bool Web() const { return target == "wasm64-web"; }
 };
 
 inline string AbsolutePath(const string &path) {
@@ -70,13 +72,24 @@ struct Builder {
         return f;
     }
 
-    // What a wasm64 link adds: a module and the JavaScript that loads it in
-    // Node, with the real file system (NODERAWFS) for the os module, memory
-    // that grows to the most Node gives memory64, and a native stack the
-    // size of Linux's main thread's.
+    // What a wasm64 link adds: a module and the JavaScript that loads it,
+    // memory that grows to the most browsers and Node give memory64, and a
+    // native stack the size of Linux's main thread's. For Node, the real
+    // file system (NODERAWFS) for the os module. For a web page, a factory
+    // (gooseProgram) the page calls once per run, a fresh instance each
+    // time, and the files --web-files packs into its memory file system.
     vector<string> WasmLinkFlags() const {
-        return { "-sENVIRONMENT=node", "-sNODERAWFS=1", "-sEXIT_RUNTIME=1",
-                 "-sALLOW_MEMORY_GROWTH=1", "-sMAXIMUM_MEMORY=16GB", "-sSTACK_SIZE=8MB" };
+        vector<string> f = { "-sEXIT_RUNTIME=1", "-sALLOW_MEMORY_GROWTH=1",
+                             "-sMAXIMUM_MEMORY=16GB", "-sSTACK_SIZE=8MB" };
+        if (opts.Web()) {
+            for (auto x : { "-sENVIRONMENT=web", "-sMODULARIZE=1", "-sEXPORT_NAME=gooseProgram" })
+                f.push_back(x);
+            for (auto &d : opts.webfiles) f.push_back("--preload-file"), f.push_back(d);
+        } else {
+            f.push_back("-sENVIRONMENT=node");
+            f.push_back("-sNODERAWFS=1");
+        }
+        return f;
     }
 
     // The system libraries a program links beyond the C library, in the cc
@@ -268,9 +281,21 @@ inline int BuildExecutable(const string &rootfile, const string &cfile, const st
         if (!exedirpath.empty()) filesystem::create_directories(exedirpath, ec);
     }
     if (!b.Link(cfile, objects, nativersps, exe, builddir, cat(builddir, "/cc.log"))) return 1;
-    if (!opts.dryrun)
+    if (opts.dryrun) return 0;
+    if (opts.Web()) {
+        // prog.html beside prog.js, which it loads by its own name.
+        auto js = exe.size() > 3 && exe.compare(exe.size() - 3, 3, ".js") == 0;
+        auto html = cat(exe.substr(0, exe.size() - (js ? 3 : 0)), ".html");
+        if (!WriteFileMakingDirs(html, WebPage(PathStem(rootfile), BaseName(exe)))) {
+            fprintf(msgs, "cannot write %s\n", html.c_str());
+            return 1;
+        }
+        fprintf(msgs, "built %s and %s (serve the folder over http, for example with "
+                      "python -m http.server, and open the page)\n", exe.c_str(), html.c_str());
+    } else {
         fprintf(msgs, "built %s%s\n", exe.c_str(),
                 opts.Wasm() ? cat(" (run it with: node ", exe, ")").c_str() : "");
+    }
     return 0;
 }
 

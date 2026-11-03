@@ -46,6 +46,7 @@
 #include "json.h"
 #include "toolchain.h"
 #include "builtin.h"
+#include "web_page.h"
 #include "build.h"
 #include "packages.h"
 #include "native.h"
@@ -754,6 +755,11 @@ R"(  --cc name|path        The C compiler: msvc, clang-cl, clang, gcc, cc or a
                         `node prog.js` runs. No threads or gfx yet; data
                         stacks get 64 MB each (--stack-reserve changes it),
                         with their growth checked (GS_GROWTH_CHECKS).
+  --target wasm64-web   The same for a browser: prog.js, prog.wasm and
+                        prog.html, a page that runs it with arguments and
+                        input from boxes. Serve the folder over http.
+  --web-files dir[@to]  Pack a directory into the web page's files (at `to`,
+                        else at dir), for a program that reads them.
   -v                    Print each command the build runs and what it prints.
   --dry-run             Print the commands the build would run, and run none.
 )");
@@ -1343,6 +1349,7 @@ int Main(int argc, char **argv) {
     auto json = false, refresh = false, debug = false, verbose = false, dryrun = false;
     auto jsondiag = false;
     string ccrequest, target;
+    vector<string> webfiles;
     // The inlining at its highest. The C compiler optimizes whatever the
     // level, unless --debug (Builder::CFlags).
     auto optlevel = 2;
@@ -1437,11 +1444,13 @@ int Main(int argc, char **argv) {
         else if (arg == "--include" && i + 1 < argc) includenames.push_back(argv[++i]);
         else if (arg == "--stdlib" && i + 1 < argc) stdlibdir = argv[++i];
         else if (arg == "--cc" && i + 1 < argc) ccrequest = argv[++i];
+        else if (arg == "--web-files" && i + 1 < argc) webfiles.push_back(argv[++i]);
         else if (arg == "--target" && i + 1 < argc) {
             target = argv[++i];
             if (target == "native") target.clear();
-            else if (target != "wasm64") {
-                fprintf(stderr, "--target takes native or wasm64, not %s\n", target.c_str());
+            else if (target != "wasm64" && target != "wasm64-web") {
+                fprintf(stderr, "--target takes native, wasm64 or wasm64-web, not %s\n",
+                        target.c_str());
                 return 1;
             }
         }
@@ -1514,7 +1523,11 @@ int Main(int argc, char **argv) {
                             "(-o out.c) writes the C for a C host\n");
             return 1;
         }
-        buildopts = BuildOptions { debug, verbose, dryrun, standalone, outname, target };
+        buildopts = BuildOptions { debug, verbose, dryrun, standalone, outname, target, webfiles };
+        if (!webfiles.empty() && !buildopts.Web()) {
+            fprintf(stderr, "--web-files is for --target wasm64-web\n");
+            return 1;
+        }
         outname.clear();
         // wasm64 regions are fixed slices of linear memory, which Node caps
         // at 16 GB for every stack together (docs/design/wasm.md §3): a
