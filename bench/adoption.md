@@ -1,5 +1,11 @@
 # Results of the compiler changes proposed in plan.md
 
+> **Deprecated language features:** `reusable` and `reusable[]`. Use
+> [`slot_pool<T>`](../docs/stdlib.md#slot_pool) for slots and
+> [`slice_pool<T>`](../docs/stdlib.md#slice_pool) for contiguous runs.
+> Builtin behavior and historical examples below remain relevant to existing
+> code; removal is planned separately, after the remaining migration gaps.
+
 *This document records a completed round of compiler changes, their
 measurements, and the reasons for adopting or rejecting each one. See
 `results.md` for the benchmark report.*
@@ -107,17 +113,16 @@ afterwards:
 
 | row | v145 | clang | row | v145 | clang |
 |---|---:|---:|---|---:|---:|
-| sum | 0.99 | 0.99 | particles | 1.00 | 1.06 |
-| push | 1.00 | 1.01 | particles_scalar | 1.00 | 1.07 |
-| strlist | 1.00 | 0.98 | sexp | 1.00 | 1.05 |
-| records_var | 1.04 | 1.09 | lru | **1.13** | **1.14** |
-| records_fixed | 1.01 | 1.00 | scene | 1.01 | 0.99 |
+| sum | 0.99 | 0.99 | particles_scalar | 1.00 | 1.07 |
+| push | 1.00 | 1.01 | sexp | 1.00 | 1.05 |
+| strlist | 1.00 | 0.98 | lru | **1.13** | **1.14** |
+| records_var | 1.04 | 1.09 | scene | 1.01 | 0.99 |
 | tree | 1.05 | 0.98 | calc | 1.04 | 1.06 |
 | interp | 1.00 | 0.99 | bintrees | **1.53** | **1.37** |
 | graph | 1.03 | 1.01 | respond | 1.08 | 1.09 |
 | graph_csr | 0.99 | 1.06 | respond_stream | 1.00 | 1.00 |
 | words | 1.01 | 1.03 | blur | **0.94** | **6.85** |
-| | | | blur_rows | 1.00 | 1.00 |
+| particles | 1.00 | 1.06 | blur_rows | 1.00 | 1.00 |
 
 `bintrees` under v145 went from 360 to 235 ms against Rust's 227, the
 combined gain the plan predicted. The only loss is `blur` under v145, also

@@ -538,6 +538,10 @@ fn join<T>(out: u8[>..]&, parts: T[:], sep: u8[:])   // T any u8 array/slice typ
 fn format_replaced(out: u8[>..]&, s: u8[:], old: u8[:], with: u8[:])   // `from` is a keyword
 fn each_utf8<F>(s: u8[:])                        // F(cp: i64); malformed bytes yield 0xFFFD
 fn push_utf8(out: u8[>..]&, cp: i64)             // the UTF-8 bytes of a code point
+fn ascii::is_digit(c: u8) -> bool                // ASCII only, as <ctype.h> in the C locale
+fn ascii::is_alpha(c: u8) -> bool
+fn ascii::is_alnum(c: u8) -> bool
+fn ascii::hex_value(c: u8) -> i64                // 0-15, -1 if not a hex digit
 ```
 
 Plain rendering of scalars and strings is the builtin `format` (§8.1); the
@@ -642,9 +646,9 @@ different, well-typed slot. Bind such references in their own block, or use
   second implementation.
 * Owned string keys: keep a `u8[>..]` text pool next to the
   `dictionary<u8[:], V>` (two locals of one scope, or a global pool); keys
-  are slices into the pool. A struct cannot hold both (one resizable per
-  struct, §3.4), which is spec TODO 8. An interner built on this idiom is a
-  candidate for a later module.
+  are slices into the pool. A `root struct` can now own both components in
+  one declaration (spec §3.4); an ordinary packed struct still cannot.
+  An interner built on this idiom is a candidate for a later module.
 * Insertion order: `dictionary` does not keep it. Where order matters, store
   values in the user's own `[>..]` and keep indices in the dictionary, which
   is what `lru.goose` does.
@@ -1076,7 +1080,8 @@ These operations can be expressed using existing functions and short loops:
   `each_split(s, ' ')` keeps the empty parts that repeated spaces leave, and
   a command line wants them dropped.)
 * Multiple-resizable containers (a deque, an owning string dictionary): the
-  language has one resizable per struct (§3.4); idioms in §5.3.
+  language now supports their state through `root struct` (spec §3.4); the
+  library APIs remain to be designed. See §5.3.
 * Binary serialization: Goose data is already its own serialized form
   (`bench/design.md`); `read_file` into a `u8[>..]` and spec TODO 16's
   whole-region copy are the way to do it, and typed `read_u32_le`-style

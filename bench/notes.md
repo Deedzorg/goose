@@ -1,5 +1,11 @@
 ## October 16, 2026 refresh
 
+> **Deprecated language features:** `reusable` and `reusable[]`. Use
+> [`slot_pool<T>`](../docs/stdlib.md#slot_pool) for slots and
+> [`slice_pool<T>`](../docs/stdlib.md#slice_pool) for contiguous runs.
+> Builtin behavior and historical examples below remain relevant to existing
+> code; removal is planned separately, after the remaining migration gaps.
+
 The main tables are a fresh run of all sixteen benchmarks, at all three
 sizes, under MSVC, clang-cl, rustc and Goose's TinyCC backend. The compiler
 was rebuilt in Release from `f6d31d0e`, with the benchmark source changes in
@@ -165,8 +171,7 @@ three words where `std::string` is four, and the enum tag is stored in the
 pointer's niche rather than needing its own word. But it is still a *fixed*
 enum, so every one of the 16M elements is sized for `Say` whether it is a
 `Say` or not, and the text needs a second allocation as well. This is a
-property of Rust's enum layout. `records_fixed.goose` provides a control
-with a fixed-size representation.
+property of Rust's enum layout.
 
 Three Goose layouts differ substantially from the corresponding C++ and Rust
 implementations:

@@ -172,6 +172,28 @@ A program that calls only these functions compiles and links no native code and
 can run with `goose run` without a C toolchain. The rest of this section covers
 packages that compile their own C.
 
+A package can include headers in the program's generated C, so the C compiler
+can inline small adapters into Goose functions:
+
+```goose
+// mylib.build
+c_headers = ["include/adapters.h"];
+```
+
+Paths are relative to the package root, or the program's directory for its
+own sidecar. As with `--include`, headers follow the generated types and
+precede extern prototypes and function bodies. They can define `static inline`
+implementations of `extern fn` declarations without a separate object file
+or a command-line `--include`. Types from unimported modules are not available.
+Headers must compile with the selected backend, including TinyCC for
+`goose run`; a header-only package needs no external C toolchain for that mode.
+
+`c_headers` takes the same platform suffixes as the other `c_*` lists. Headers
+are included in list order: command-line `--include` entries, the program's
+sidecar, then packages in load order. Headers include their own dependencies;
+`c_include`, `c_defines` and `c_flags_*` still apply only to separately compiled
+native sources, not the program's generated C.
+
 The sidecar names the C in one of two ways. The first is plain sources,
 which the compiler compiles with the given includes, defines, flags and
 libraries:
@@ -212,9 +234,10 @@ exclude = ["tools", "third_party/demo"];
 ```
 
 Most values an `extern fn` passes have layouts that C can declare for
-itself, such as a slice as `{ data, len }` (spec §7.10). A builder,
-`u8[>..]&`, is the exception: C appends to it through the runtime, and
-`goose.h` gives separately compiled C access to the runtime for this. The
+itself, such as a slice as `{ data, len }` (spec §7.10). A builder
+(`T[>..]&`, such as `u8[>..]&`) is the exception: C appends to it through
+the runtime's `gs_rref`, and `goose.h` gives separately compiled C access to
+the runtime for this, along with `gs_bld_append` for bytes. The
 compiler puts that header on the include path of every native part,
 including the program's own and CMake targets, and rebuilds them all when
 the header changes:
@@ -231,6 +254,82 @@ repository, as `gfx`, `audio` and `ui` do. A package whose functions keep
 one state for the process, or that may only be called from the main thread,
 says so in its sidecar with `main_thread_only = true;`, and calling it from
 a `thread_fn` is then a compile error.
+
+### Using Goose types in a C header
+
+A `c_headers` adapter uses the types Goose has already declared; it does not
+redeclare them or import a C struct into Goose. Here is a complete local
+package and a program that calls it:
+
+```goose
+// mylib/mylib.goose
+namespace mylib;
+struct Pair { lo: u32, hi: u32 }
+extern fn swap(p: Pair) -> Pair = "mylib_swap";
+```
+
+```goose
+// mylib/mylib.build
+c_headers = ["include/adapters.h"];
+```
+
+```c
+// mylib/include/adapters.h
+#ifndef MYLIB_ADAPTERS_H
+#define MYLIB_ADAPTERS_H
+
+static inline mylib_Pair_g5 mylib_swap(mylib_Pair_g5 p) {
+    mylib_Pair_g5 result;
+    result.lo_g = p.hi_g;
+    result.hi_g = p.lo_g;
+    return result;
+}
+
+#endif
+```
+
+```goose
+// app.goose, beside the mylib directory
+import mylib from "./mylib";
+fn main() {
+    let p = mylib::swap(mylib::Pair { 20, 22 });
+    assert(p.lo == 22 && p.hi == 20);
+    print(p.lo, " ", p.hi);
+}
+```
+
+`goose run app.goose` prints `22 20`; `goose build app.goose` builds the
+same program with the native C compiler. Neither needs `--include` or a
+separately compiled `.c` file.
+
+The names in the header follow spec §7.10:
+
+| Goose declaration | C spelling | Rule |
+| --- | --- | --- |
+| `mylib::Pair` | `mylib_Pair_g5` | namespace, `_`, type name, `_g`, namespace length |
+| `Pair` without a namespace | `Pair_g` | type name followed by `_g` |
+| Fields `lo`, `hi` | `lo_g`, `hi_g` | field name followed by `_g`, without the namespace |
+| `swap(...) = "mylib_swap"` | `mylib_swap` | the explicit extern symbol, unchanged |
+
+The `5` is the length of `mylib`, not an import-order number. For example,
+`goosimd::Bytes32` becomes `goosimd_Bytes32_g7`. A package's import path does
+not set these names; its `namespace` declaration does.
+
+Inspect the actual declarations with `goose -o app.c app.goose`: the type
+definitions appear before the adapter's `#include`, and extern prototypes
+follow it. This is especially useful for generic or composite types, whose
+names include their type arguments and may need collision suffixes. User
+field names get `_g`; compiler-defined slice members remain `data` and `len`.
+
+Use the generated type rather than a second C definition with similar
+fields. These naming rules are not a stable binary ABI contract: matching
+names or fields does not establish compatible layout, alignment, or calling
+conventions with an independently compiled C library. Goose structs are
+packed, not naturally aligned C structs. An adapter for an existing C API
+must account for that API's representation rather than assume the types are
+interchangeable. Separately compiled `c_sources` do not see the generated
+declarations; this example relies on compiling the header and the Goose code
+together in the same C translation unit.
 
 ### Files a package needs at run time
 
