@@ -41,9 +41,15 @@ a recommendation.
   - [4.5 Options rejected: a stack per container, memmove insertion](#45-options-rejected-a-stack-per-container-memmove-insertion)
   - [4.6 Option E: append handles, a checked push through a reference](#46-option-e-append-handles-a-checked-push-through-a-reference)
   - [4.7 The options side by side](#47-the-options-side-by-side)
-- [5. Costs shared by every in-place option](#5-costs-shared-by-every-in-place-option)
-- [6. Prior art](#6-prior-art)
-- [7. Recommendation](#7-recommendation)
+- [5. Iterating the result](#5-iterating-the-result)
+  - [5.1 Walk again](#51-walk-again)
+  - [5.2 Hand the end back](#52-hand-the-end-back)
+  - [5.3 Store the size](#53-store-the-size)
+  - [5.4 What each variant must do to keep the size right](#54-what-each-variant-must-do-to-keep-the-size-right)
+  - [5.5 What iteration looks like, and what it needs](#55-what-iteration-looks-like-and-what-it-needs)
+- [6. Costs shared by every in-place option](#6-costs-shared-by-every-in-place-option)
+- [7. Prior art](#7-prior-art)
+- [8. Recommendation](#8-recommendation)
 
 </details>
 
@@ -516,7 +522,8 @@ on the order of pushes, and a program that holds many handles and appends
 in a data-dependent order finds out under test, not at compile time. That
 is the one place this breaks with the rest of the language. "Append
 anywhere" still means anywhere on the open path: a closed sibling is
-closed, and the abort says so.
+closed, and the abort says so. Reading a tape built this way has a cost
+of its own, section 5.4.
 
 **The same operation as Option A.** A push through a handle and a push in
 a builder block or a named-result recursion add the same bytes to the same
@@ -547,7 +554,234 @@ block.
 | Checker work | medium | high | low | low | done |
 | Result | one flat value | one flat value | one flat value | one flat value | three arrays with links |
 
-## 5. Costs shared by every in-place option
+## 5. Iterating the result
+
+Everything above is about writing the tape. Reading it back has a cost of
+its own, and the cost depends on the variant.
+
+A `Json..[>..]` is sequential. `for child in a.children` reaches each child
+by adding the previous child's size to a cursor, and that is how the
+backend does it today: the loop's increment calls the generated size walker
+(`gs_size_<T>` in `src/codegen_types.h`), and that walker, for a nested
+array, loops over the array's elements adding up their sizes. For a `u8[][]`
+that is one read per string. For a recursive element type it is a walk of
+the child's whole subtree, since the only way to find where an `Arr` ends
+is to find where each of its children ends. A traversal that also descends
+into each child (`eval`, `print`, a serializer, a lookup) therefore walks
+each subtree twice at every level, once for the work and once for the loop
+to step over it, and a node at depth `d` is walked by `d` loops on the way
+back up. That is O(n·depth) reads for a document of `n` nodes, and the
+extra reads are the same bytes the work just read.
+
+By hand in C one returns the end pointer from the recursive step, so that
+the caller's loop continues from where the callee stopped. Or the format
+carries sizes: Protocol Buffers prefix every nested message with its byte
+length, FlatBuffers reach everything through offsets, and simdjson's tape
+records at each container's start the index of its end. The count-only
+formats, CBOR and MessagePack, have exactly the problem above and pay the
+walk whenever a reader skips a value. Three ways for Goose follow.
+
+### 5.1 Walk again
+
+Do nothing: the size walker R1 generates is what the loop calls. This is
+correct, it is the default if nothing else is done, and it is acceptable
+for shallow data. It is also the only choice for a reader that cannot
+trust what the tape says about sizes, which section 5.4 comes back to.
+
+### 5.2 Hand the end back
+
+Make "the size of what a recursive step parsed" a language concept: a
+reference to an element of a sequential array carries its end as well as
+its start, and a recursive step that iterated the element's children to
+the end has that end in its loop cursor and returns it, for the caller's
+loop to continue from. This is the C idiom as a feature. The trouble is
+that the body produces an end only when it walked the whole element,
+including any fields after the nested array; a body that skips (`if key ==
+"x"`), stops early or does not descend produces none, so the loop would
+need to know statically which bodies do, and fall back to the walk for the
+rest. It couples the body's control flow to the loop's stepping for a
+saving that 5.3 gets without either. Not recommended.
+
+### 5.3 Store the size
+
+A nested array whose element type is recursive keeps its byte size beside
+its count: `{ count: u32, bytes: u32 }` in front of the children. The
+producer knows the size at the one moment the container completes, as the
+top minus the start, and writes it once; every reader thereafter steps
+over the container by reading that word. Stepping over a `Json` element
+is then a constant number of reads and no recursion: the tag, and then by
+variant nothing (`Null`, `Bool` and `Num` are fixed), the varint length
+(`Str`), or `bytes` (`Arr` and `Obj`); a `Member` adds its key's varint
+length in front. It is not literally one read, since the tag has to say
+which variant the element is before its size can be read, but the switch
+is small and, in JSON, mostly predictable. The size walker keeps its shape;
+its array case reads a word instead of looping.
+
+What follows from it:
+
+* `for` is O(1) per step and a full traversal is O(n), whatever the depth.
+* `member(obj, key)` skips each value it does not want in O(1), so a lookup
+  is O(members), not O(subtree): the one operation where the linked pool
+  was clearly ahead of a tape.
+* `copy`, `bytes_of` and `to_bytes` of a subtree are a memcpy or a view of
+  known length. A finished tape is a FlatBuffers-like format: a reader can
+  skip a megabyte of array with a tag and a size read, and a document can
+  be sliced into subdocuments without parsing them.
+* The verifier that `from_bytes` runs checks each stored size against the
+  walk, once, so an image cannot lie about where a container ends.
+* The cost is four bytes per container, paid only by arrays of recursive
+  element types, the same set of types R1 already singles out. The same
+  word could be offered for any nested array (reaching the field after a
+  `u8[][]` field is O(count) today), but nothing here needs that.
+
+Whether `count` stays beside `bytes` is a separate choice. A loop can run
+on `cursor < end` alone, and simdjson stores only the end (with a capped
+count packed into the same word). Dropping `count` saves four bytes per
+container at the price of `.len` becoming O(children) for these arrays,
+when it is O(1) for every other array in the language. Keep both unless
+measurements of a real tape say otherwise.
+
+**Where the word goes, and where not.** Three placements are possible, and
+they differ in what a skip costs and what the data costs:
+
+* *Per element*: every `Json..` element length-prefixed. A skip is one
+  read and no branch, at four bytes for every `Null` and `Num` as well.
+  Too much for what it buys: the tag dispatch it saves is a small switch,
+  and JSON arrays are mostly homogeneous.
+* *Per nested array of a recursive element type*, the proposal: four bytes
+  per `Arr` or `Obj`, nothing on leaves, and a skip is the tag plus one or
+  two reads.
+* *Per nested array of any non-fixed element type*: the same word on every
+  `u8[][]` or `Shape..[]` field too, so that reaching a field behind one,
+  or skipping an element that holds one, is O(1) instead of O(count).
+
+The third is the question of whether the array in an enum payload and the
+array at the tail of a struct should keep different representations. They
+are less different than they look. A `[>..]` at the root, or at the tail of
+a local or global struct, keeps its count in the owning frame (Appendix
+C.2) and its size is the top minus its base, so it never needs the word,
+whichever placement is chosen; the question only concerns the at-rest `[]`
+form of an array inside an element or a field. The reason to keep the word
+to recursive element types is that it removes an unbounded cost there and
+a bounded one elsewhere: re-walking a non-recursive nested array costs a
+factor of at most the type's static nesting depth, which is one or two in
+every type in the repository, while for a recursive type the factor is the
+data's depth. The repository holds no stdlib, benchmark or sample value
+with a nested array of non-fixed elements at all (its sequential data is
+strings and variable-mode ADTs whose payloads are fixed fields, strings and
+references, all skipped in O(1)); `u8[][]` fields occur in five tests. So
+there is no measured case today where the bounded cost shows. Uniformity
+would remove one case from the walker and the verifier, make every nested
+array O(1) to skip and to view with `bytes_of`, and give serialized images
+one shape, for four bytes per such array: per array of non-fixed elements,
+not per element, and not on strings, whose elements are fixed. Since the
+choice is a flip of the one predicate the walker consults, it can wait for
+a measurement; the note proposes the recursive-only form until then.
+
+### 5.4 What each variant must do to keep the size right
+
+A stored size is a promise about bytes that may still be written, so each
+variant has to say when it is written and when it can be trusted.
+
+**Option A: free.** An element completes at a statically known point, the
+one at which the parent's count is exposed (`docs/design/result_construction.md`),
+and the start is the slot the parent reserved, so the store is one
+subtraction beside the count increment: at the end of a builder block, when
+a named result is received into the parent's push, when a literal finishes,
+in `copy`. The resizable root's size is the top minus its base and needs no
+word. Nothing a reader can reach is incomplete, since the open element is
+not yet counted by its parent, so readers trust every stored size, during
+construction as well as after. Support: one more header word for those
+arrays, one store at a point that already exists, the walker's array case,
+and the verifier.
+
+**Option E: at the retreat.** A push through a handle makes every container
+on the open path longer, and the handle knows none of them, so there is no
+completion point to write at. The invariant that works instead is: **every
+closed container has a correct stored size; an open container's stored size
+may be stale, and no reader uses it.** No reader needs it, because an open
+container is the last child of its parent, and nothing steps past a last
+child. The sizes are written where the open path retreats:
+
+* `parent.resume(child)` seals the child: one store, since the child ends
+  at the top.
+* The slow path's walk seals what it walks. The walk itself need not be
+  O(subtree): only the containers on the last-child chain from the last
+  element down can be open, so the walk goes by count along that chain and
+  skips every other child by its stored size, which makes it
+  O(depth × fanout) rather than O(subtree), and it writes the chain's sizes
+  as it goes, since the push that follows closes them.
+* The fast path closes nothing unsealed. A handle whose cached end is the
+  top was the last pusher, so everything inside its last element was sealed
+  by the resume or the walk that preceded that push.
+
+What a reader must not do is take the stored size of a possibly open
+container as the truth. Stepping never does. `bytes_of`, `copy` and
+`to_bytes` of a *nested* element would, so on a root that is still
+resizable they are either refused (serialization v1 already refuses
+references into a field of an element) or computed by the walk. A reader
+that starts at the root knows the open path (it is the last-child chain)
+and can be exact. Support: the seal in `resume` and in the walk, the
+chain-aware walk, and the refusal. Moderate, and all of it in the runtime
+side of the push rather than in the checker. The alternative is a single
+seal pass when the root freezes (O(n); the checker proves no handle is
+live, which is the shrink-liveness check it has) with walk-by-count readers
+before that: simpler, at the price of 5.1's cost while the tree is still
+being built.
+
+**Option D: not needed.** Siblings are linked, so stepping is a load. The
+stored size brings the tape to parity with the pool for stepping and
+skipping, without the links, and leaves the pool ahead only for
+insertion in the middle.
+
+### 5.5 What iteration looks like, and what it needs
+
+In the source, iteration is what it would have been anyway: a `for` over
+the children and case functions or a `match` on each, with the payload
+bound by reference so that nothing is copied.
+
+```goose
+fn total(j: Json.Num&) -> f64 { j.v }
+fn total(j: Json.Null&) -> f64 { 0.0 }
+fn total(j: Json.Bool&) -> f64 { 0.0 }
+fn total(j: Json.Str&) -> f64 { 0.0 }
+recursive fn total(j: Json.Arr&) -> f64 {
+    var t = 0.0;
+    for &c in j.children { t += total(c); }      // steps over c by its tag and size
+    return t;
+}
+recursive fn total(j: Json.Obj&) -> f64 {
+    var t = 0.0;
+    for &m in j.members { t += total(m.val); }
+    return t;
+}
+
+fn member(j: Json.Obj&, key: u8[:]) -> Json..? {
+    for &m in j.members { if m.key == key { return m.val; } }   // skips each val unwalked
+    return null;
+}
+```
+
+The language needs nothing new for this: `for` over a sequential array,
+`&`-binding in a loop and in case functions, and a recursive case function
+returning through a back edge all exist. What is new is below the surface:
+
+| | Walk again (5.1) | Store the size (5.3) under A | Store the size under E |
+|---|---|---|---|
+| Representation | as today | `bytes` beside `count` for arrays of recursive element types | the same |
+| Written | never | at the element's completion, beside the count increment | at `resume` and in the slow path's walk |
+| Trusted | n/a | always | for closed containers; nested `bytes_of`/`copy`/`to_bytes` refused on a resizable root |
+| Step over a child | O(subtree) | O(1) | O(1) |
+| Full traversal | O(n·depth) | O(n) | O(n) |
+| `member` lookup | O(subtree) | O(members) | O(members) |
+| Checker work | none | none | none |
+| Backend work | none | header word, one store, walker case, verifier | the same, plus the chain-aware walk and the seal in `resume` |
+
+The one thing every reader needs, whichever column, is the `&`-binding of
+a resizable ADT's payload that section 2 found unsupported: without it
+`for &c in j.children` has nothing to bind.
+
+## 6. Costs shared by every in-place option
 
 * **The resizable-ADT payload gap** (section 2) is on the critical path:
   the root `Json..` is a resizable ADT, and both `a.children.push(…)` and
@@ -572,7 +806,7 @@ block.
   walk, serialize and ship. That is the same split simdjson makes between
   its DOM and its tape.
 
-## 6. Prior art
+## 7. Prior art
 
 * **GNU obstacks** are the direct ancestor: one object at a time may grow
   (`obstack_grow`), the obstack allocates nothing else until
@@ -593,11 +827,11 @@ block.
   where it ends, built in one pass by a parser that keeps an explicit
   open-container stack, and read sequentially. The finished `Json..` tape
   is the same shape with Goose's own counts; simdjson keeps its mutable
-  DOM separate, as section 5 suggests.
+  DOM separate, as section 6 suggests.
 * **MLKit regions and ParaSail** are covered in `prior_art.md`; neither has
   the nested-growth-on-one-region idea, since both allocate whole objects.
 
-## 7. Recommendation
+## 8. Recommendation
 
 1. **R1 first** (section 3.1): recursion through an array, with recursive
    walkers only for the types on a containment cycle. It stands on its
@@ -616,7 +850,11 @@ block.
    builder block and the named result in a recursion (the §7.8 relaxation),
    with the check kept in debug builds as the oracle. `checkfree fn` then
    covers appends as it covers indexing.
-4. **Keep `json::Node`** as the mutable, key-addressable document model;
+4. **Store the size** (5.3) from the start, for arrays of recursive
+   element types: one header word, written where the count already is
+   under A, and the difference between a tape that is read in O(n) and one
+   that is read in O(n·depth). Under E it is written at the retreat (5.4).
+5. **Keep `json::Node`** as the mutable, key-addressable document model;
    do not try to make the tape mutable.
-5. **Drop Options B and C.** E subsumes C (it is C with the end problem
+6. **Drop Options B and C.** E subsumes C (it is C with the end problem
    solved) and gives B's flexibility without its typestate.

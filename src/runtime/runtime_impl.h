@@ -23,6 +23,9 @@ static const char *gs_errmsgs[] = {
     "non-null relative reference encodes as null",
     "pop_n count negative or beyond the array's length",
     "queue limit of zero or less",
+    "invalid array length",
+    "slice not within this array",
+    "slice pool span tree is corrupt",
 };
 
 /* Ends the process with `code`, its streams flushed: exit() and every
@@ -64,22 +67,25 @@ static GS_TLS gs_contained *gs_contain;
    bytes at `msg` and the location after it. A contained worker's keeps the
    message, without the "goose runtime error: " every printed one starts
    with, and ends that worker; anything else's prints it and ends the
-   process. */
+   process. A NULL file is a check the runtime makes on its own, which has
+   no Goose location to print. */
 static GS_NORETURN void gs_fail(const void *msg, int64_t len, const char *file, int line) {
     static const char lead[] = "goose runtime error: ";
     int64_t pre = sizeof lead - 1;
-    int64_t loc = snprintf(NULL, 0, " (%s:%d)\n", file, line);
+    int64_t loc = file ? snprintf(NULL, 0, " (%s:%d)\n", file, line) : 1;
     uint8_t *text = (uint8_t *)malloc((size_t)(pre + len + loc + 1));
     if (!text) {
         if (gs_contain) gs_panic("out of memory recording an aborted thread");
         fputs(lead, stderr);
         fwrite(msg, 1, (size_t)len, stderr);
-        fprintf(stderr, " (%s:%d)\n", file, line);
+        if (file) fprintf(stderr, " (%s:%d)\n", file, line);
+        else fputc('\n', stderr);
         gs_end(1);
     }
     memcpy(text, lead, (size_t)pre);
     if (len) memcpy(text + pre, msg, (size_t)len);
-    snprintf((char *)text + pre + len, (size_t)loc + 1, " (%s:%d)\n", file, line);
+    if (file) snprintf((char *)text + pre + len, (size_t)loc + 1, " (%s:%d)\n", file, line);
+    else memcpy(text + pre + len, "\n", 2);
     if (gs_contain) {
         memmove(text, text + pre, (size_t)(len + loc - 1));
         gs_contain->msg = text;
@@ -264,6 +270,18 @@ static size_t gs_overflow_text(char *buf, const gs_region *r) {
     return (size_t)(p - buf);
 }
 
+GS_API GS_NORETURN void gs_stack_overflow(const void *at) {
+    for (long i = 0; i < gs_nregions; i++) {
+        const gs_region *r = &gs_regions[i];
+        if ((uintptr_t)at - (uintptr_t)r->base < r->size) {
+            char msg[GS_OVERFLOW_TEXT];
+            fwrite(msg, 1, gs_overflow_text(msg, r), stderr);
+            gs_end(1);
+        }
+    }
+    gs_panic("data stack overflow");
+}
+
 /* The calling thread program's registry, empty, as it starts. */
 static void gs_regions_begin(int64_t capacity) {
     gs_regions_cap = (long)capacity;
@@ -300,9 +318,8 @@ GS_API void gs_release_regions(void) {
 #include <fcntl.h>
 
 static size_t gs_page_size = 0;
-#ifdef GS_HOSTED_JIT
-static void *gs_jit_fault_handler;
-#endif
+/* The vectored handler gs_regions_init registered, for gs_fault_uninstall. */
+static void *gs_fault_handle;
 #define GS_COMMIT_CHUNK (1u << 20)
 /* What each thread program keeps of its native stack for reporting that
    stack's overflow (gs_native_stack_init). */
@@ -360,14 +377,11 @@ static size_t gs_os_page_size(void) {
     return si.dwPageSize;
 }
 
-/* Installed once by main, before any worker can start. */
+/* Installed by main as the runtime starts, before any worker can. */
 static void gs_regions_init(void) {
     gs_page_size = gs_os_page_size();
-    void *handler = AddVectoredExceptionHandler(1, gs_fault_filter);
-#ifdef GS_HOSTED_JIT
-    gs_jit_fault_handler = handler;
-#endif
-    if (!handler)
+    gs_fault_handle = AddVectoredExceptionHandler(1, gs_fault_filter);
+    if (!gs_fault_handle)
         gs_panic("cannot install data stack fault handler");
 }
 
@@ -398,6 +412,22 @@ static void gs_release_region(const gs_region *r) {
         gs_panic("cannot release data stack address space");
 }
 
+/* Faults are handled as before gs_regions_init (gs_rt_stop). TinyCC's
+   kernel32.def does not list RemoveVectoredExceptionHandler, so a program
+   it builds looks it up, as gs_native_stack_init does. */
+static void gs_fault_uninstall(void) {
+    if (gs_fault_handle) {
+        #ifdef __TINYC__
+            ULONG (WINAPI *remove)(PVOID) = (ULONG (WINAPI *)(PVOID))GetProcAddress(
+                GetModuleHandleA("kernel32.dll"), "RemoveVectoredExceptionHandler");
+            if (remove) remove(gs_fault_handle);
+        #else
+            RemoveVectoredExceptionHandler(gs_fault_handle);
+        #endif
+    }
+    gs_fault_handle = NULL;
+}
+
 /* Whether this is the first call of gs_end; and where the later ones wait. */
 static int gs_end_first(void) {
     static volatile LONG ended;
@@ -424,11 +454,10 @@ static GS_TLS uintptr_t gs_native_lo, gs_native_hi;
 /* The alternate signal stack gs_native_stack_init allocated, if it did. */
 static GS_TLS void *gs_sigstack;
 #define GS_SIGSTACK_MIN (64u << 10)
-/* What the fault handler replaced, for the faults that are not its own. */
+/* What the fault handler replaced, for the faults that are not its own,
+   and which of them it did (1: SIGSEGV, 2: SIGBUS), for gs_fault_uninstall. */
 static struct sigaction gs_prev_segv, gs_prev_bus;
-#ifdef GS_HOSTED_JIT
-static int gs_jit_fault_installed;
-#endif
+static int gs_fault_installed;
 
 /* For gs_trim_memory, which discards whole pages only. */
 static size_t gs_page_size = 0;
@@ -471,15 +500,11 @@ static void gs_regions_init(void) {
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     if (sigaction(SIGSEGV, &sa, &gs_prev_segv))
         gs_panic("cannot install data stack fault handler");
-#ifdef GS_HOSTED_JIT
-    gs_jit_fault_installed = 1;
-#endif
+    gs_fault_installed = 1;
     #ifdef SIGBUS
         if (sigaction(SIGBUS, &sa, &gs_prev_bus))
             gs_panic("cannot install data stack fault handler");
-#ifdef GS_HOSTED_JIT
-        gs_jit_fault_installed |= 2;
-#endif
+        gs_fault_installed |= 2;
     #endif
 }
 
@@ -566,6 +591,15 @@ static uint8_t *gs_os_reserve(size_t usable, size_t size) {
 
 static void gs_release_region(const gs_region *r) {
     if (munmap(r->base, r->size)) gs_panic("cannot release data stack address space");
+}
+
+/* Faults are handled as before gs_regions_init (gs_rt_stop). */
+static void gs_fault_uninstall(void) {
+    if (gs_fault_installed & 1) sigaction(SIGSEGV, &gs_prev_segv, NULL);
+    #ifdef SIGBUS
+        if (gs_fault_installed & 2) sigaction(SIGBUS, &gs_prev_bus, NULL);
+    #endif
+    gs_fault_installed = 0;
 }
 
 /* Whether this is the first call of gs_end; and where the later ones wait.
@@ -1633,6 +1667,11 @@ static void gs_watch_stop(const gs_region *regions) { (void)regions; }
 
 GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t gap,
                         uint64_t budget, int64_t mainregions, int64_t workerregions) {
+    /* A host's goose_init of a second program (an image it reloaded, say)
+       over the regions of the first, which share this runtime: starting
+       would forget them rather than release them. */
+    if (gs_regions)
+        gs_panic("a program is already started in this process: call its goose_exit first");
     gs_argc = argc;
     gs_argv = argv;
     /* A region's usable part is whole pages: the guard gap behind it has to
@@ -1682,6 +1721,17 @@ GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t gap,
            file says so then. Run by the compiler, gs_release_regions does. */
         if (gs_watch_running) atexit(gs_watch_at_exit);
     #endif
+}
+
+/* The inverse, on main's thread: its regions and registry, then the fault
+   handling and the arguments. gs_rt_stop (runtime_threads.h) adds the
+   thread programs' part; the JIT host calls this directly, since a program
+   it runs may return from main with workers still running (jit_runtime.c). */
+static void gs_rt_release(void) {
+    gs_release_regions();
+    gs_fault_uninstall();
+    gs_argc = 0;
+    gs_argv = NULL;
 }
 
 /* ---------------------------------------------------------------------------
