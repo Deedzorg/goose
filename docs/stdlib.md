@@ -6,6 +6,8 @@
 - [std](#std)
 - [exception](#exception)
 - [dictionary](#dictionary)
+- [slot_pool](#slot_pool)
+- [slice_pool](#slice_pool)
 - [vec](#vec)
 - [math](#math)
 - [os](#os)
@@ -22,9 +24,10 @@
 
 </details>
 
-The standard library has sixteen modules under `stdlib/`: `std`,
-`dictionary`, `vec`, `math`, `os`, `ffi`, `binary`, `base64`, `csv`, `json`,
-`regex`, `audio`, `gfx`, `physics`, `ui`, and `exception`. Import each module by name,
+The standard library has eighteen modules under `stdlib/`: `std`,
+`dictionary`, `slot_pool`, `slice_pool`, `vec`, `math`, `os`, `ffi`, `binary`,
+`base64`, `csv`, `json`, `regex`, `audio`, `gfx`, `physics`, `ui`, and `exception`.
+Import each module by name,
 for example `import std;`. The compiler locates the library in its source
 tree; use `--stdlib <dir>` or `GOOSE_STDLIB` to select another location.
 Everything is written in Goose except the following parts, all reached
@@ -102,14 +105,17 @@ The library uses these conventions:
   `T` the reference type. `stable_sort` sorts an array of `in pool` links,
   but its temporary array cannot hold copies of self-relative links (spec
   §3.9).
-* The `std`, `dictionary`, `vec`, `math`, and `os` names are global;
+* The `std`, `dictionary`, `slot_pool`, `slice_pool`, `vec`, `math`, and `os` names are global;
   `ffi`, `binary`, `base64`, `csv`, `json`, `regex`, `audio`, `gfx`,
   `physics`, `ui` and `exception` use their own namespaces, and so do the
-  helpers `std` and `json` read and write float text with, in `float_text`.
+  helpers `std` and `json` read and write float text with, in `float_text`,
+  and `std`'s ASCII character classes, in `ascii`.
   A local named `fill` or `count` shadows the global function of that name,
   so a call to that function is an error. A global variable of such a name does not
   shadow it, because the name in a call resolves past global variables to
   the functions (spec §11.1).
+  Slice allocator implementation types and helpers use `slice_pool_detail`;
+  applications should use the public pool operations.
 
 ## std
 
@@ -289,6 +295,10 @@ fn to_lower(s: u8[:])                           // ASCII, in place
 fn to_upper(s: u8[:])
 ```
 
+`copy_into` preserves its element-by-element, first-to-last semantics. For a
+checked copy that preserves the source values when the slices overlap, use the
+language operation `dst.move_from(src)` (fixed-size, copyable elements).
+
 `sort` is a pattern-defeating quicksort based on pdqsort and Rust's
 ipnsort. It is unstable (the order it leaves equal elements in is
 unspecified), works in place and does not allocate. Its partition does not
@@ -352,8 +362,9 @@ let smallest = q.heap_pop();
 ```goose
 fn format_int<B>(out: B&, v: i64, base: i64, width: i64, padc: u8)   // base 2..36, right-aligned
 fn format_uint<B>(out: B&, v: u64, base: i64, width: i64, padc: u8)   // B: u8[>..] or u8[..k]
-fn format_flt(out: u8[>..]&, v: f64, decimals: i64)        // fixed decimals, rounded half up; inf/-inf/nan as print writes them
+fn format_flt(out: u8[>..]&, v: f64, decimals: i64)        // fixed decimals, the exact value rounded half up; inf/-inf/nan as print writes them
 fn parse_int(s: u8[:], base: i64 = 10) -> i64, bool        // optional sign, whole string; false outside i64
+fn parse_uint(s: u8[:], base: i64 = 10) -> u64, bool       // optional '+', whole string; false on '-' or outside u64
 fn parse_flt(s: u8[:]) -> f64, bool                        // sign, fraction, exponent; correctly rounded
 fn format_uleb(out: u8[>..]&, v: i64)                     // LEB128 (3.6), 1-10 bytes
 fn parse_uleb(s: u8[:]) -> i64, i64                       // value and byte count; 0, 0 if malformed
@@ -364,12 +375,18 @@ fn split(s: u8[:], sep: u8) -> const u8[:][>..]            // read-only slices i
 fn split(s: u8[:], sep: u8[:]) -> const u8[:][>..]         // matched from the left; an empty sep: [s]
 fn each_split<F>(s: u8[:], sep: u8)                        // F(part); no array built
 fn each_split<F>(s: u8[:], sep: u8[:])
+fn split_once(s: u8[:], sep: u8) -> const u8[:], const u8[:], bool    // before, after the first sep
+fn split_once(s: u8[:], sep: u8[:]) -> const u8[:], const u8[:], bool // not found: s, "", false
 fn words(s: u8[:]) -> const u8[:][>..]                     // split at runs of ASCII whitespace; no empty words
 fn each_word<F>(s: u8[:])                                  // F(word)
 fn join<T>(out: u8[>..]&, parts: T[:], sep: u8[:])         // T any u8 array/slice type
 fn format_replaced(out: u8[>..]&, s: u8[:], old: u8[:], with: u8[:])
 fn each_utf8<F>(s: u8[:])                                  // F(codepoint); malformed bytes give 0xFFFD
 fn push_utf8(out: u8[>..]&, cp: i64)                       // 0xFFFD's bytes for cp outside 0..0x10FFFF
+fn ascii::is_digit(c: u8) -> bool                          // '0'-'9'
+fn ascii::is_alpha(c: u8) -> bool                          // 'a'-'z', 'A'-'Z'
+fn ascii::is_alnum(c: u8) -> bool                          // either
+fn ascii::hex_value(c: u8) -> i64                          // 0-15 for 0-9, a-f, A-F; -1 otherwise
 ```
 
 The builtins `format`/`str`/`print` do the plain rendering of scalars and
@@ -380,6 +397,28 @@ the decimal, as C's `strtod` does, so a float's text from `print` or
 `format` reads back as the same value. Strings are `u8` arrays: input is a
 `u8[:]`, output goes to a `u8[>..]&` builder, and storage is a `u8[]` or
 `u8[..k]`.
+
+`split_once` cuts s at the first sep, as Go's `strings.Cut` does: the part
+before and the part after, read-only slices into s, and `true`. When sep is
+not in s it gives s whole, an empty slice and `false`, so the first part is
+the whole field either way. An empty sep is never found, as in `split`.
+
+The character classes are ASCII only, as C's `<ctype.h>` is in the C
+locale and Rust's `u8::is_ascii_digit` and its kin are: no byte from 0x80
+up is in any of them. They live in the namespace `ascii`, which `import
+std;` brings in, so that short, common names like `is_digit` stay free in
+the global one.
+
+```goose
+let text = "1f8B rest";
+var v = 0;
+var i = 0;
+while i < text.len && ascii::hex_value(text[i]) >= 0 {
+    v = v * 16 + ascii::hex_value(text[i]);
+    i++;
+}
+print(v, " ", i, " ", ascii::is_alpha(text[i + 1]));   // 8075 4 true
+```
 
 `each_utf8` decodes as the WHATWG decoder does. A sequence cut short, an
 overlong form, a surrogate or a code point past 0x10FFFF gives one 0xFFFD
@@ -394,6 +433,7 @@ format(line, "x=");
 format_int(line, x, 16, 8, '0');
 each_split(text, '\n') { handle(trim(it)); };
 let n, ok = parse_int(trim(field));
+let key, value, has_value = split_once(arg, '=');   // "-o=out": "-o", "out", true
 let cmd = words(input);                   // "take  the sword": ["take", "the", "sword"]
 if cmd.len > 1 && cmd[0] == "take" { take(cmd[cmd.len - 1]); }
 ```
@@ -409,6 +449,15 @@ var head: u8[>..] = [];
 format_uleb(head, payload.len);
 write_file(path, head); append_file(path, payload);
 ```
+
+`format_flt` rounds the exact binary value of `v`, at any size and to any
+number of places: `format_flt(out, 0.1, 20)` writes
+`0.10000000000000000555`, as C's `printf("%.20f")` does, and
+`format_flt(out, 2.675, 2)` writes `2.67`, since the double nearest 2.675
+is just below it. Only a value that is exactly halfway rounds differently
+from `printf`, which rounds half to even: `format_flt(out, 0.125, 2)`
+writes `0.13`. The plain `format` writes the shortest text that reads back
+as the same value.
 
 ## exception
 
@@ -545,6 +594,233 @@ owner.insert(7, cells[4]);       // cells[3] is unchanged, and c still refers to
 if c { c.v += 1; }
 ```
 
+## Migrating from reusable
+
+`reusable` and `reusable[]` are deprecated; their builtins are still available.
+Import `slot_pool` for individual slots or `slice_pool` for contiguous runs.
+
+| Existing spelling | Library spelling |
+|---|---|
+| `reusable var p: T[>..] = [];` | `var p = slot_pool<T> {};` |
+| `reusable[] var p: T[>..] = [];` | `var p = slice_pool<T> {};` |
+| pool parameter `p: T[>..]&` | `p: slot_pool<T>&` or `p: slice_pool<T>&` |
+| `p[i]`, `p.len`, `for x in p` | `p.items[i]`, `p.items.len`, `for x in p.items` |
+| `u32 in p`, `Node&<u32 in p>` | `u32 in p.items`, `Node&<u32 in p.items>` |
+| `p.alloc_ref(value)` | same for copyable values; `p.alloc_with() { fresh_value }` for in-place construction |
+| `p.alloc_index(value)` | same for copyable values; `p.alloc_index_with() { fresh_value }` for in-place construction |
+| `p.free(i)` | same; or `p.free_ref(node)` when the element is not itself a reference |
+| `p.alloc_slice(n)`, `p.free_slice(s)`, `p.realloc_slice(s, n)` | same method spellings on `slice_pool` |
+| allocate a slice, then copy into it | `p.alloc_copy(source)` |
+
+Both libraries keep stable, initialized backing storage. `items.len` is the
+high-water count, including free entries, and iteration visits those entries.
+Freed references/views remain valid and can observe replacement values; logical
+use-after-free and double-free detection require application bookkeeping.
+`recycle_all` makes all storage reusable without shrinking it or clearing values.
+Do not shrink/replace `items` or modify allocator bookkeeping directly.
+
+Wrong-pool slot frees through `free_ref` retain `index_of`'s compile-time check.
+Wrong-pool nonempty slice frees currently fail a runtime containment check
+(`slice_pool.free_slice: slice is not from this pool`); there is no
+compile-time warning yet. Empty slices from any origin are harmless. Like
+every check inside the standard library, the pools' report the line of the
+program that called them.
+Eligible `items` can be serialized independently, but this omits allocator state.
+Whole root owners cannot be serialized or copied to workers automatically.
+For flat elements, [the worker snapshot sample](../samples/32_pool_worker_snapshots.goose)
+copies `items` and allocator metadata explicitly into a worker-local owner.
+Its slice metadata types are implementation details, so keep that recipe in step
+with the library rather than treating it as a stable serialization format.
+
+Pool references can be stored in ordinary structs, captured, returned while their
+owner lives, and made optional. This is more flexible than builtin pool references.
+The owning root itself remains local/global-only; nested owning roots are deferred.
+
+## slot_pool
+
+`import slot_pool;` provides stable, reusable slots through ordinary root-struct
+fields and functions. Use it instead of the deprecated `reusable` language feature.
+
+```goose
+root struct slot_pool<T> {
+    items: T[>..] = [],
+    free_slots: i64[>..<] = []
+}
+
+fn alloc_index<T>(pool: slot_pool<T>&, value: T) -> i64
+fn alloc_ref<T>(pool: slot_pool<T>&, value: T) -> T&
+fn alloc_with<T, F>(pool: slot_pool<T>&) -> T&
+fn alloc_index_with<T, F>(pool: slot_pool<T>&) -> i64
+fn free<T>(pool: slot_pool<T>&, i: i64)
+fn free_ref<T>(pool: slot_pool<T>&, value: T&)
+fn recycle_all<T>(pool: slot_pool<T>&)
+```
+
+Declare a local or global owner and use `items` for ordinary indexing, slicing,
+iteration and `index_of`:
+
+```goose
+import slot_pool;
+
+fn main() {
+    var pool = slot_pool<i64> {};
+    let first .= pool.alloc_ref(10);
+    let index = pool.items.index_of(first);
+    pool.free(index);
+    assert(pool.alloc_index(20) == index);
+    print(first);                         // 20: the same slot, now reused
+}
+```
+
+Elements must be fixed-size. No default value is needed: every allocation
+supplies a value. `alloc_index` and `alloc_ref` take normally copyable values.
+An allocation takes the most recently
+freed index, or appends when no slot is free. `alloc_index` returns its index;
+`alloc_ref` returns a reference to its value. For reference elements, `T&`
+collapses to `T` as usual; use `alloc_index` when the slot's identity is needed.
+Whole-element assignment replaces reference-valued elements without writing
+through them.
+
+`alloc_with` and `alloc_index_with` take a zero-argument function or trailing block
+producing `T`; the latter returns the chosen index directly.
+It selects the slot first, calls the builder once, and constructs the result
+directly there. This supports self-relative links and pool-relative `self`:
+
+```goose
+import slot_pool;
+struct Node { value: i64, me: Node&<u32>, next: Node&<u32>? }
+fn main() {
+    var nodes = slot_pool<Node> {};
+    let first .= nodes.alloc_with() { Node { value: 1, me: self } };
+    let second .= nodes.alloc_with() { Node { value: 2, me: self, next: first } };
+    let index = nodes.items.index_of(second);
+    nodes.free(index);
+    nodes.alloc_with() { Node { value: 3, me: self, next: first } };
+    assert(second.value == 3 && second.me .== second);
+}
+```
+
+Fresh results may come from other functions. Existing self-relative values
+still cannot be copied, and links must point within the receiving array.
+A trailing block infers its result type; for a reference-valued `T`, pass a
+named function explicitly returning that reference type.
+
+Unlike value arguments, the builder runs after a free index has been removed.
+A slot freed by the builder stays available for a later allocation. A fresh
+slot joins `items.len` only when construction completes; a nonlocal return
+before completion does not publish it. Reuse is not transactional: a nonlocal
+exit does not restore the popped index or undo initializer side effects.
+The usual construction rules reject conflicting growth of `items` during
+the builder. Bounds checks on a recycled index run before the builder.
+
+`free` checks `0 <= i < items.len` in every build, then records the index. It
+leaves the element initialized and does not shrink the array. Existing references
+remain valid and can observe a later replacement. Double frees and use of a
+logically freed slot are application errors, as with `reusable`; the pool does
+not track occupancy or generations. `items.len` is the number of slots ever
+appended, including free ones, and iteration visits those slots too.
+
+Treat `free_slots` as bookkeeping. Do not shrink or replace `items`, or edit the
+freelist directly: doing so can invalidate the pool's logical state. Ordinary
+array bounds and lifetime checks still apply. `recycle_all` makes every slot
+available again in index order, retaining initialized values and backing storage.
+It does not shrink `items`, destroy values, or invalidate existing references.
+`free_ref` combines `index_of` with `free`, retaining its compile-time provenance
+check; use indices for reference-valued elements, whose references name the
+pointee rather than the pool slot. An eligible `items` component
+can be serialized separately, but its image omits the freelist.
+
+For a global `var pool`, compact links and index types can name its array:
+`Node&<u32 in pool.items>`, `u32 in pool.items`, and `u32 upto pool.items`.
+Pool-relative values with ordinary links are copyable and work with `alloc_ref`.
+Self-relative values and `self` initializers use `alloc_with` to construct at
+the allocated slot.
+A root owner cannot be copied to a worker; worker-local pools are allowed.
+See [the migration plan](design/root_structs.md#separate-follow-up-reusable-pools-in-the-stdlib).
+
+## slice_pool
+
+`import slice_pool;` provides reusable contiguous runs of fixed-size elements.
+`alloc_slice` and `realloc_slice` require defaults; `alloc_copy` only requires
+copyable values. An owner is declared as `var pool = slice_pool<T> {};`.
+Use it instead of the deprecated `reusable[]` language feature. Both builtins
+remain available for existing code; their removal is a separate future step.
+
+```goose
+fn alloc_slice<T>(pool: slice_pool<T>&, n: i64) -> T[:]
+fn alloc_copy<T>(pool: slice_pool<T>&, src: T[:]) -> T[:]
+fn free_slice<T>(pool: slice_pool<T>&, s: T[:])
+fn realloc_slice<T>(pool: slice_pool<T>&, s: T[:], n: i64) -> T[:]
+fn recycle_all<T>(pool: slice_pool<T>&)
+```
+
+```goose
+import slice_pool;
+fn main() {
+    var pool = slice_pool<i64> {};
+    var entries = pool.alloc_slice(3);
+    entries[0] = 7;
+    entries = pool.realloc_slice(entries, 5);
+    print(entries);                         // [7, 0, 0, 0, 0]
+    pool.free_slice(entries);
+    let again = pool.alloc_slice(2);
+    print(again, " ", pool.items.len);       // [0, 0] 5
+}
+```
+
+Allocation selects the first free span in index order that fits. If none fits,
+it grows the backing array, using any free span at the tail first. Free spans
+coalesce with their neighbors. An augmented B+ tree of 512-byte nodes handles
+first-fit search and neighbor lookup with tree walks and bounded node scans;
+emptied nodes are reused. The tree code is the runtime's, `reusable[]`'s, in a
+copy that checks what it reads from `nodes` and `tree`, so the policy matches.
+
+`alloc_slice` defaults every element it hands out, including reused elements.
+`alloc_copy` initializes directly from a source slice, without default-filling
+first. It supports overlapping views of `items` and does not free the source.
+For example, `strings.alloc_copy(text)` allocates and copies a string.
+`realloc_slice` preserves the first `min(s.len, n)` elements, returns a shortened
+tail to the tree, and defaults each added element once. Growth stays in place
+at the array's end or when the following free span suffices (including tail
+extension). Otherwise it frees the old run and selects the first fit, copying
+with overlap-safe ordering. Default expressions must not mutate or reenter the
+same pool. Every published backing-array element is initialized.
+
+`free_slice` and `realloc_slice` accept subranges of a pool run. They check that
+a nonempty slice is aligned and wholly within `items`, even when its origin is
+only known at runtime. Empty/default slices can be freed harmlessly; growing an
+empty slice allocates a new run. Negative or oversized counts abort in every
+build before the tree changes. `items.range_index(s)` recovers a nonempty run's
+index; it returns zero for every empty slice.
+
+Freeing and shrinking runs do not shrink `items` or invalidate old views. A
+retained view observes later replacements at its original address; relocation
+does not retarget it. Double frees, overlapping live allocations caused by
+invalid frees, and accessing a logically freed run are application errors.
+`items.len` is the high-water length, not the count of live elements. Treat
+`nodes` and `tree` as internal bookkeeping, and do not shrink or replace `items`.
+Ordinary bounds and lifetime checks still apply to these public fields. The
+runtime checks every node number and entry count it reads from them: one a
+program wrote wrong aborts with `slice pool span tree is corrupt`. A span
+edited to start past `items` aborts with `span tree is corrupt` from the
+operation that drew it; other edited spans can hand elements out twice, as a
+double free can.
+`recycle_all` makes the entire high-water range one free run and recycles all
+metadata nodes. It retains initialized values, backing storage and existing
+views; the next allocation starts at index zero.
+
+The owner follows the same placement, serialization and worker restrictions as
+`slot_pool`: serialize eligible `items` separately, and construct worker-local
+owners rather than transferring root owners. `alloc_slice` constructs defaults
+in place, so allocation and free support defaultable self-relative elements;
+`realloc_slice` requires normally copyable elements, just as the builtin does.
+Global index/pool-relative types can name `pool.items`, as for `slot_pool`.
+Optional references to separately owned storage and declared field defaults are
+supported when `T` has a default.
+
+See the [slice-pool benchmark report](../bench/slice_pool.md) for comparisons
+against `reusable[]`, including preserved function-call boundaries.
+
 ## vec
 
 ```goose
@@ -575,12 +851,15 @@ scalar converts to the component type, so an `f64` variable scaling a
 
 `math` provides libm at both widths (`sin(x)` picks `sin` or `sinf` by the
 argument's type): `sqrt sin cos tan asin acos atan atan2 exp log log2 log10
-pow floor ceil round trunc`. These return floats as C does (`as i64`
-converts).
+pow hypot cbrt exp2 expm1 log1p sinh cosh tanh floor ceil round trunc
+copysign`. These return floats as C does (`as i64` converts). `expm1(x)`
+and `log1p(x)` are `exp(x) - 1` and `log(1 + x)` without the loss of a
+small `x`'s digits; `copysign(x, y)` is `x`'s magnitude with `y`'s sign
+bit, which tells `-0.0` from `0.0`.
 `sqrt` is implemented in the runtime (`gs_sqrt`, `gs_sqrtf`). It gives the
 same correctly rounded root as C, and NaN below zero, but without C's
 errno, so it is the bare square root instruction where the C compiler
-allows. The other functions for which C sets errno (`sin` to `pow`) are
+allows. The other functions for which C sets errno (`sin` to `tanh`) are
 libm's own functions under runtime names (`gs_exp`, `gs_expf`, ...), which
 gcc and clang are told depend only on their arguments. Since Goose has no
 errno, a call does not make the C compiler reload values that a loop
@@ -621,10 +900,35 @@ The module also has:
 
 ```goose
 let PI = 3.141592653589793;   let TAU = 6.283185307179586;
+let E = 2.718281828459045;    let INF = 1.0 / 0.0;   let NAN = 0.0 / 0.0;
 fn radians(deg: f64) -> f64   fn degrees(rad: f64) -> f64      // and f32
 fn is_nan(x: f64) -> bool     fn is_inf(x: f64) -> bool        // and f32
 fn is_finite(x: f64) -> bool                                   // not inf or NaN; and f32
+fn fract(x: f64) -> f64                                        // x - floor(x); and f32
+fn inverse_lerp(a: f64, b: f64, v: f64) -> f64                 // (v - a) / (b - a); and f32
+fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64           // and f32
+fn wrap_angle(x: f64) -> f64                                   // into [-PI, PI); and f32
 ```
+
+`fract`, `smoothstep` and `inverse_lerp` follow GLSL and std's `lerp`:
+
+- `fract(x)` is `x - floor(x)`, so it is never negative: `fract(-0.25)` is
+  `0.75`. A tiny negative `x` rounds to `1.0`, as in GLSL.
+- `inverse_lerp(a, b, v)` undoes `lerp(a, b, t)`: 0 at `a`, 1 at `b`, and
+  not clamped, so `v` past `b` gives more than 1. It is NaN or an infinity
+  when `a == b`.
+- `smoothstep(edge0, edge1, x)` is 0 up to `edge0`, 1 from `edge1`, and
+  `3t² - 2t³` of the clamped `t = inverse_lerp(edge0, edge1, x)` between.
+  Edges in reverse run it backwards. Equal edges, which GLSL leaves
+  undefined, give 0 below the edge, 1 above it and NaN at it.
+- `wrap_angle(x)` adds or takes whole turns to bring radians into
+  `[-PI, PI)`, as a floored remainder would: `PI` wraps to `-PI`, and `-0.0`
+  stays `-0.0`. The f32 form's bounds are `PI` rounded to f32.
+
+Each gives NaN for a NaN argument, and `fract` and `wrap_angle` give NaN
+for an infinity. `NAN`'s sign is unspecified.
+`INF` and `NAN` take the type the context asks for, as `PI` does
+(`let inf32: f32 = INF;`).
 
 ## os
 
@@ -644,6 +948,7 @@ fn delete_dir(path: const u8[:]) -> bool                   // an empty one
 fn list_dir(path: const u8[:], out: u8[>..]&) -> bool      // appends each name and '\n', sorted
 fn read_line(out: u8[>..]&) -> bool                  // stdin, newline stripped; false at end
 fn read_stdin(out: u8[>..]&)                         // everything until end of input
+fn read_stdin(out: u8[>..]&, max: i64) -> bool       // up to max bytes; false at end
 fn write_stdout(s: const u8[:])   fn write_stderr(s: const u8[:])   fn flush_stdout()
 fn arg_count() -> i64       fn arg(i: i64, out: u8[>..]&)
 fn args() -> u8[:][>..]                              // indexable; argument 0 is the program
@@ -687,7 +992,11 @@ file.
 `read_file` appends nothing when it fails. `read_stdin` appends the bytes
 unchanged, on Windows too, where the C library's text mode would turn each
 `\r\n` into a `\n` and stop at a Ctrl-Z. `read_line` strips a `\r` before a
-line's newline, along with the newline.
+line's newline, along with the newline. `read_stdin(out, max)` appends up
+to `max` bytes and waits until it has them or input ends, so a large pipe
+can be read in pieces. It returns false, having appended nothing, when no
+bytes were left or `max` is 0 or less. Interactive input in lines stays with
+`read_line`.
 
 `write_file_atomic` is for files that must never be seen half-written, such
 as saved games. It writes the data to a new file in the same directory as
@@ -782,8 +1091,9 @@ if SDL_Init(0x20) < 0 { abort(str("SDL: ", ffi::cstr(SDL_GetError()))); }
 
 ## binary
 
-Checked, little-endian reads of external formats, written entirely in Goose.
-`import binary;` puts the API in namespace `binary`. Input is a `const u8[:]`;
+Checked reads and appending writes of external formats, little- and
+big-endian, written in Goose (floats take their bits through small runtime
+helpers). `import binary;` puts the API in namespace `binary`. Input is a `const u8[:]`;
 returned byte slices and fixed-width names borrow that input without copying
 or allocating. Their lifetimes and read-only access are checked normally.
 This API does not interpret Goose serialization images (`from_bytes`).
@@ -792,9 +1102,16 @@ This API does not interpret Goose serialization images (`from_bytes`).
 
 ```goose
 fn range_ok(data: const u8[:], at: i64, size: i64) -> bool
-fn read_u16le(data: const u8[:], at: i64) -> u16, bool
-fn read_i16le(data: const u8[:], at: i64) -> i16, bool
-fn read_u32le(data: const u8[:], at: i64) -> u32, bool
+fn read_u8(data: const u8[:], at: i64) -> u8, bool
+fn read_i8(data: const u8[:], at: i64) -> i8, bool
+fn read_u16le(data: const u8[:], at: i64) -> u16, bool    // and read_u16be
+fn read_i16le(data: const u8[:], at: i64) -> i16, bool    // and read_i16be
+fn read_u32le(data: const u8[:], at: i64) -> u32, bool    // and read_u32be
+fn read_i32le(data: const u8[:], at: i64) -> i32, bool    // and read_i32be
+fn read_u64le(data: const u8[:], at: i64) -> u64, bool    // and read_u64be
+fn read_i64le(data: const u8[:], at: i64) -> i64, bool    // and read_i64be
+fn read_f32le(data: const u8[:], at: i64) -> f32, bool    // and read_f32be
+fn read_f64le(data: const u8[:], at: i64) -> f64, bool    // and read_f64be
 fn read_bytes(data: const u8[:], at: i64, size: i64) -> const u8[:], bool
 fn read_name(data: const u8[:], at: i64, width: i64) -> const u8[:], bool
 ```
@@ -802,7 +1119,10 @@ fn read_name(data: const u8[:], at: i64, width: i64) -> const u8[:], bool
 Offsets and sizes are bytes. Negative values, truncated fields and offsets
 past the end fail with zero or an empty slice and `false`; range checking
 does not overflow on extreme offsets or sizes. An empty range at the end
-is valid. Reads work at unaligned offsets on either host byte order.
+is valid. Reads work at unaligned offsets on either host byte order. The
+`le` reads take the least significant byte first, the `be` reads the most
+significant. A float read keeps the value's bits exactly, NaN payloads
+included.
 `read_name` validates the entire fixed-width field and returns the bytes
 before its first NUL, or all `width` bytes if there is no NUL. It does not
 validate padding or interpret the bytes as a particular text encoding.
@@ -812,9 +1132,8 @@ validate padding or interpret the bytes as a particular text encoding.
 ```goose
 struct Reader { data: const u8[:], pos: i64 }
 fn reader(data: const u8[:]) -> Reader
-fn read_u16le(r: Reader&) -> u16, bool
-fn read_i16le(r: Reader&) -> i16, bool
-fn read_u32le(r: Reader&) -> u32, bool
+fn read_u8(r: Reader&) -> u8, bool
+fn read_u16le(r: Reader&) -> u16, bool    // every offset read has a cursor form
 fn read_bytes(r: Reader&, size: i64) -> const u8[:], bool
 fn read_name(r: Reader&, width: i64) -> const u8[:], bool
 fn skip(r: Reader&, size: i64) -> bool
@@ -851,6 +1170,35 @@ Use offset reads for random access and cursors for sequential records.
 Applications still validate signatures, counts, indices and format-specific
 limits after checking the read. The WAD loader in
 [`31_mini_doom.goose`](../samples/31_mini_doom.goose) shows both styles.
+
+### Writes
+
+```goose
+fn write_u8(out: u8[>..]&, v: u8)
+fn write_i8(out: u8[>..]&, v: i8)
+fn write_u16le(out: u8[>..]&, v: u16)    // and write_u16be
+fn write_i16le(out: u8[>..]&, v: i16)    // and write_i16be
+fn write_u32le(out: u8[>..]&, v: u32)    // and write_u32be
+fn write_i32le(out: u8[>..]&, v: i32)    // and write_i32be
+fn write_u64le(out: u8[>..]&, v: u64)    // and write_u64be
+fn write_i64le(out: u8[>..]&, v: i64)    // and write_i64be
+fn write_f32le(out: u8[>..]&, v: f32)    // and write_f32be
+fn write_f64le(out: u8[>..]&, v: f64)    // and write_f64be
+```
+
+Each write appends the value's bytes to `out`, in the order the read of the
+same name takes them, so a write followed by that read gives the value back.
+A float write keeps the value's bits exactly, NaN payloads included. The
+writes cannot fail; `out` grows as an append does.
+
+```goose
+var out: u8[>..] = [];
+binary::write_u32be(out, 0x89504E47);    // a signature, most significant byte first
+binary::write_u16le(out, 3);
+binary::write_f32le(out, 1.5);
+let version, version_ok = binary::read_u16le(out, 4);
+assert(version_ok && version == 3);
+```
 
 ## base64
 

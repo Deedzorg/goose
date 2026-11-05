@@ -674,6 +674,23 @@ inline void CodeGen::BindLocal(VarDef *d, Node *init, bool forlocal) {
     }
     auto name = LocalName(d);
     auto t = d->type;
+    if (IsRoot(t)) {
+        auto sl = Is<StructLit>(init);
+        assert(sl && sl->sinst->st->isroot);
+        L(CT(t), " ", name, " = { 0 };");
+        for (size_t i = 0; i < d->components.size(); i++) {
+            auto c = d->components[i];
+            if (!c) continue;
+            BindLocal(c, sl->InitFor((int)i), forlocal);
+            Ident id(c->line, c->name);
+            id.vdef = c;
+            id.exprtype = c->type;
+            auto ref = c->type->kind == TY_REF ? cat("&", VarLoc(c).s)
+                                              : GenRefVal(&id, init->line);
+            L(name, ".", Sanitize(sl->sinst->st->fields[i].name), " = ", ref, ";");
+        }
+        return;
+    }
     if (IsResz(t) || IsBytesT(t)) {
         assert(init);
         auto dst = DeclStackLocal(d, forlocal);
@@ -716,7 +733,8 @@ inline void CodeGen::BindLocal(VarDef *d, Node *init, bool forlocal) {
         L(name, " = ", GenXD(init, t), ";");
         return;
     }
-    L(CT(t), " ", name, " = ", GenXD(init, t), ";");
+    auto ct = CT(t), x = GenXD(init, t);
+    L(ct, " ", name, " = ", x, ";");
 }
 
 // Declares the local `d` of a resizable or bytes type -- a resizable's
