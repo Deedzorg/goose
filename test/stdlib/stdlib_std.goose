@@ -213,6 +213,21 @@ fn inplace() {
     print(lo);                                                                 // hello world
     to_upper(lo);
     print(lo);                                                                 // HELLO WORLD
+    var lower: u8[258] = [0; 258];
+    var upper: u8[258] = [0; 258];
+    for i in 256 { lower[i + 1] = i as u8; upper[i + 1] = i as u8; }
+    lower[0] = 'A'; lower[257] = 'Z';
+    upper[0] = 'a'; upper[257] = 'z';
+    to_lower(lower[1..257]);
+    to_upper(upper[1..257]);
+    for i in 256 {
+        assert(lower[i + 1] == (if i >= 65 && i <= 90 { i + 32 } else { i }) as u8);
+        assert(upper[i + 1] == (if i >= 97 && i <= 122 { i - 32 } else { i }) as u8);
+    }
+    assert(lower[0] == 'A' && lower[257] == 'Z');
+    assert(upper[0] == 'a' && upper[257] == 'z');
+    to_lower(lower[1..1]);
+    to_upper(upper[1..1]);
 }
 
 fn lengths() {
@@ -265,12 +280,40 @@ fn strings() {
     f.push(' ');
     format_flt(f, 0.005, 2);
     print(f);                                                                  // 3.14 -3 0.01
+    // The exact value rounds, not x * 10^d: 0.49999999999999994 is below a
+    // half, 1e19 and 1.8e19 scale past 2^63, 0.1 has its binary digits at
+    // 25 places, and 5e-324 is the smallest subnormal.
+    var g: u8[>..] = [];
+    format_flt(g, 0.49999999999999994, 0);
+    g.push(' ');
+    format_flt(g, 1e19, 1);
+    g.push(' ');
+    format_flt(g, -1.8e19, 0);
+    g.push(' ');
+    format_flt(g, 0.1, 25);
+    g.push(' ');
+    format_flt(g, 9.995, 2);
+    g.push(' ');
+    format_flt(g, 999.9996, 3);
+    g.push(' ');
+    format_flt(g, 5e-324, 2);
+    print(g);   // 0 10000000000000000000.0 -18000000000000000000 0.1000000000000000055511151 9.99 1000.000 0.00
+    var h: u8[>..] = [];
+    format_flt(h, 5e-324, 330);
+    print(h.len, " ", h[h.len - 7..]);                                         // 332 4940656
+    h.resize(0);
+    format_flt(h, 1.7976931348623157e308, 0);
+    print(h.len, " ", h[..10]);                                                // 309 1797693134
     let v, ok = parse_int("-123");
     print(v, " ", ok);                                                         // -123 true
     let v2, ok2 = parse_int("12x");
     print(v2, " ", ok2);                                                       // 0 false
     let v3, ok3 = parse_int("ff", 16);
     print(v3, " ", ok3);                                                       // 255 true
+    let u, oku = parse_uint("18446744073709551615");
+    print(u, " ", oku);                                                        // 18446744073709551615 true
+    let u2, oku2 = parse_uint("-1");
+    print(u2, " ", oku2);                                                      // 0 false
     let fl, okf = parse_flt("-1.5e2");
     print(fl, " ", okf);                                                       // -150.0 true
     let fl2, okf2 = parse_flt("abc");
@@ -296,6 +339,29 @@ fn strings() {
     print(over.len, " ", over[0].len, " ", over[1]);                           // 2 0 a
     let whole = split("a b", "");
     print(whole.len, " ", whole[0]);                                           // 1 a b
+    let key, value, kv = split_once("k=v=w", '=');
+    print(key, "|", value, "|", kv);                                           // k|v=w|true
+    let ka, va, okc = split_once("a::b::c", "::");
+    print(ka, "|", va, "|", okc);                                              // a|b::c|true
+    let nf, nfa, nfok = split_once("abc", "x");
+    print(nf, "|", nfa.len, "|", nfok);                                        // abc|0|false
+    let nb, nba, nbok = split_once("abc", 'x');
+    print(nb, "|", nba.len, "|", nbok);                                        // abc|0|false
+    let lead, rest, lok = split_once("=x", '=');
+    print(lead.len, "|", rest, "|", lok);                                      // 0|x|true
+    let body, tail, tok = split_once("ab--", "--");
+    print(body, "|", tail.len, "|", tok);                                      // ab|0|true
+    let es, esa, esok = split_once("", ',');
+    let es2, esa2, esok2 = split_once("", "--");
+    print(es.len, esa.len, esok, " ", es2.len, esa2.len, esok2);               // 00false 00false
+    let eb, ea, eok = split_once("ab", "");
+    print(eb, "|", ea.len, "|", eok);                                          // ab|0|false
+    let lng, lnga, lngok = split_once("ab", "abc");
+    print(lng, "|", lnga.len, "|", lngok);                                     // ab|0|false
+    var buf: u8[>..] = [];
+    format(buf, "name: goose");
+    let bk, bv, bok = split_once(buf, ": ");
+    print(bk, "|", bv, "|", bok);                                              // name|goose|true
     var line: u8[>..] = [];
     format(line, "  take \t the\r\nsword  ");
     let cmd = words(line);
