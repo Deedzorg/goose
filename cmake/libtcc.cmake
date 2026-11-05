@@ -57,6 +57,10 @@ if(WIN32)
 else()
     string(APPEND tcc_config "#define CONFIG_TCC_LIBPATHS \"{B}\"\n")
 endif()
+# Use separate writable and executable file mappings on SELinux systems.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND EXISTS "/sys/fs/selinux/enforce")
+    string(APPEND tcc_config "#define CONFIG_SELINUX 1\n")
+endif()
 # Written only when it changes, so reconfiguring does not rebuild TinyCC.
 file(CONFIGURE OUTPUT "${TCC_BUILD}/config.h" CONTENT "${tcc_config}" @ONLY)
 
