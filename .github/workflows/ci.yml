@@ -9,8 +9,11 @@
 # clang on Ubuntu, Apple clang on macOS.
 name: CI
 
+# Feature branches run CI through a pull request or Run workflow, not on every
+# push, to keep this fork's Actions usage within GitHub's limits for forks.
 on:
   push:
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
