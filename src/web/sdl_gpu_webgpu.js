@@ -8,7 +8,15 @@
    blocking calls. Pointers arrive as BigInt (memory64), hence Number(). */
 
 addToLibrary({
-  $WG__deps: ['$UTF8ToString'],
+  // SDL 3.4's Emscripten code takes a wasm64 pointer for a BigInt
+  // (SDL.c: `Number(ptr / 4n)`), but Emscripten 6 hands it some as Numbers
+  // (what `_SDL_malloc` returns to its pointer events, for one), and every
+  // pointer event then throws. SDL keeps a helper it finds already set, so
+  // this one, which takes either, is set before SDL starts.
+  $SDLPointerFix__postset: "Module['SDL3'] ||= {}; Module['SDL3'].CPtrToHeap32Index = (p) => Math.floor(Number(p) / 4);",
+  $SDLPointerFix: {},
+
+  $WG__deps: ['$UTF8ToString', '$SDLPointerFix'],
   $WG: {
     objs: [null],
     free: [],
