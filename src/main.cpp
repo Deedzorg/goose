@@ -764,12 +764,13 @@ R"(  --cc name|path        The C compiler: msvc, clang-cl, clang, gcc, cc or a
                         the runtime object built once per C compiler.
   --target wasm64       Build 64-bit WebAssembly with Emscripten (EMSDK, emcc
                         on PATH, or --cc): prog.js and prog.wasm, which
-                        `node prog.js` runs. No threads or gfx yet; data
+                        `node prog.js` runs. Threads run as workers; data
                         stacks get 64 MB each (--stack-reserve changes it),
                         with their growth checked (GS_GROWTH_CHECKS).
   --target wasm64-web   The same for a browser: prog.js, prog.wasm and
                         prog.html, a page that runs it with arguments and
-                        input from boxes. Serve the folder over http.
+                        input from boxes, and draws gfx through WebGPU.
+                        Serve the folder over http.
   --web-files dir[@to]  Pack a directory into the web page's files (at `to`,
                         else at dir), for a program that reads them.
   -v                    Print each command the build runs and what it prints.
@@ -1549,6 +1550,14 @@ int Main(int argc, char **argv) {
         auto reserved = false;
         for (auto &d : cdefines) reserved |= d.rfind("GS_STACK_RESERVE", 0) == 0;
         if (buildopts.Wasm() && !reserved) cdefines.push_back("GS_STACK_RESERVE=(64ull << 20)");
+        // The stacks of every thread together: 12 GB of those 16, the rest
+        // for the C heap, native stacks and the module, which is what caps
+        // hardware_threads() (about 90 workers of two stacks).
+        auto budgeted = false;
+        for (auto &d : cdefines) budgeted |= d.rfind("GS_STACK_BUDGET", 0) == 0;
+        if (buildopts.Wasm() && !budgeted) cdefines.push_back("GS_STACK_BUDGET=(12ull << 30)");
+        // A page draws through WebGPU, whose shaders are WGSL (gfx_blob.h).
+        web_shaders = buildopts.Web();
         auto checked = false;
         for (auto &d : cdefines) checked |= d.rfind("GS_GROWTH_CHECKS", 0) == 0;
         if (buildopts.Wasm() && !checked) cdefines.push_back("GS_GROWTH_CHECKS=1");
@@ -1797,9 +1806,9 @@ int Main(int argc, char **argv) {
                 throw CompileError { cat("cannot write export header: ", headername) };
             if (stats) fprintf(msgs, "wrote %s (%d bytes)\n", headername.c_str(), (int)header.size());
         }
-        if (buildopts.Wasm() && cg.usesthreads)
-            throw CompileError { "--target wasm64 does not support threads yet (no shared "
-                                 "memory: docs/design/wasm.md)" };
+        // wasm64 threads are pthreads over shared memory (docs/design/wasm.md
+        // §8): the build compiles and links with -pthread.
+        if (buildopts.Wasm()) buildopts.threads = cg.usesthreads;
         if (jit && !nocgen) {
             // TinyCC's in-memory runner rejects a thread-local section, and
             // the runtime keeps each worker's data stacks in one.
@@ -1873,11 +1882,29 @@ int Main(int argc, char **argv) {
                 vector<string> rsps;
                 for (auto pkg : nativepkgs) {
                     auto &p = astp->packages[pkg];
+                    // WebAssembly (docs/design/wasm.md §8): every native part
+                    // built from its sources by Emscripten, a builtin one too.
+                    // gfx (and ui and audio, its modules) draws on a page's
+                    // canvas through WebGPU, on the page's own thread.
                     if (buildopts.Wasm()) {
-                        fprintf(stderr, "the %s package has native parts, which --target wasm64 "
-                                        "cannot build yet (docs/design/wasm.md)\n",
-                                p.name.c_str());
-                        return 1;
+                        if (p.name == "gfx") {
+                            if (!buildopts.Web()) {
+                                fprintf(stderr, "the gfx package draws on a web page: build it "
+                                                "with --target wasm64-web\n");
+                                return 1;
+                            }
+                            if (buildopts.threads) {
+                                fprintf(stderr, "--target wasm64-web cannot build a program that "
+                                                "uses both gfx and threads yet "
+                                                "(docs/design/wasm.md)\n");
+                                return 1;
+                            }
+                            buildopts.canvas = true;
+                        }
+                        NativeBuild nb;
+                        if (!BuildNativePart(*astp, pkg, filename, b, false, nb)) return 1;
+                        rsps.push_back(nb.rsp);
+                        continue;
                     }
                     if (p.builtin >= 0) {
                         rsps.push_back(BuiltinPackageLinkFile(builtin_packages[p.builtin],

@@ -2035,14 +2035,52 @@ R"GSRT(/* Address space for one region, or NULL where the platform has none left
    strict overcommit accounting, which counts even a MAP_NORESERVE mapping.
    Commit-on-touch via overcommit; the gap at the end stays PROT_NONE. */
 #ifdef __EMSCRIPTEN__
+#ifdef __EMSCRIPTEN_PTHREADS__
+void emscripten_force_exit(int status);   /* emscripten.h */
+#endif
 /* WebAssembly (docs/design/wasm.md §3, fixed partitions): linear memory
    has no unmapped pages, so a region is a slice of it taken off the end by
    sbrk, untouched (Emscripten's mmap would zero the whole of it), and its
    gap cannot fault. The gap is zeroed instead, and gs_end reports a region
    whose gap no longer is: an overrun is found as the program ends, not as
    it happens, and may have written past the gap into the region after.
-   Growth checks (wasm.md §2) are what will catch it in time. */
-static uint8_t *gs_os_reserve(size_t usable, size_t size) {
+   Growth checks (wasm.md §2) are what will catch it in time.
+
+)GSRT"
+R"GSRT(   Linear memory is never given back, so a released region goes on a free
+   list that the next reservation of its sizes takes from: a program that
+   starts thread after thread reuses the same few regions rather than
+   growing memory by a region pair per thread (milestone 4). What a region
+   held stays in it, which Goose cannot read: no read path reaches a slot
+   that was never written (goose_spec.md §5.3). */
+typedef struct gs_free_region {
+    struct gs_free_region *next;
+    size_t usable, size;
+} gs_free_region;
+static gs_free_region *gs_free_regions;
+static int gs_free_regions_lock;
+
+)GSRT"
+R"GSRT(static void gs_free_regions_acquire(void) {
+    while (__atomic_exchange_n(&gs_free_regions_lock, 1, __ATOMIC_ACQUIRE))
+        while (__atomic_load_n(&gs_free_regions_lock, __ATOMIC_RELAXED)) {}
+}
+static void gs_free_regions_release(void) {
+    __atomic_store_n(&gs_free_regions_lock, 0, __ATOMIC_RELEASE);
+}
+
+)GSRT"
+R"GSRT(static uint8_t *gs_os_reserve(size_t usable, size_t size) {
+    gs_free_regions_acquire();
+    for (gs_free_region **at = &gs_free_regions; *at; at = &(*at)->next) {
+        gs_free_region *f = *at;
+        if (f->usable == usable && f->size == size) {
+            *at = f->next;
+            gs_free_regions_release();
+            return (uint8_t *)f;
+        }
+    }
+    gs_free_regions_release();
     uintptr_t align = (uintptr_t)gs_page_size;
     void *p = sbrk((intptr_t)(size + align));
     if (p == (void *)-1) return NULL;
@@ -2052,24 +2090,43 @@ static uint8_t *gs_os_reserve(size_t usable, size_t size) {
 }
 
 )GSRT"
-R"GSRT(/* Linear memory is never given back. */
-static void gs_release_region(const gs_region *r) { (void)r; }
+R"GSRT(static GS_NORETURN void gs_end(int code);
+
+)GSRT"
+R"GSRT(/* Whether a region's gap was written, reported as a native overflow is. */
+static int gs_gap_overrun(const gs_region *r) {
+    for (const uint8_t *p = r->base + r->usable; p < r->base + r->size; p++) {
+        if (*p) {
+            char msg[GS_OVERFLOW_TEXT];
+            ssize_t w = write(2, msg, gs_overflow_text(msg, r, 0));
+            (void)w;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+)GSRT"
+R"GSRT(/* Back on the free list, once its gap is known to be untouched: a worker's
+   regions are checked here, as its thread program ends, and main's at
+   gs_end. */
+static void gs_release_region(const gs_region *r) {
+    if (gs_gap_overrun(r)) gs_end(1);
+    gs_free_region *f = (gs_free_region *)r->base;
+    f->usable = r->usable;
+    f->size = r->size;
+    gs_free_regions_acquire();
+    f->next = gs_free_regions;
+    gs_free_regions = f;
+    gs_free_regions_release();
+}
 
 )GSRT"
 R"GSRT(/* The regions of this thread program whose gap was written: one report, of
    the first. */
 static int gs_gaps_overrun(void) {
-    for (long i = 0; i < gs_nregions; i++) {
-        const gs_region *r = &gs_regions[i];
-        for (const uint8_t *p = r->base + r->usable; p < r->base + r->size; p++) {
-            if (*p) {
-                char msg[GS_OVERFLOW_TEXT];
-                ssize_t w = write(2, msg, gs_overflow_text(msg, r, 0));
-                (void)w;
-                return 1;
-            }
-        }
-    }
+    for (long i = 0; i < gs_nregions; i++)
+        if (gs_gap_overrun(&gs_regions[i])) return 1;
     return 0;
 }
 
@@ -2144,6 +2201,12 @@ R"GSRT(static GS_NORETURN void gs_end(int code) {
     fflush(NULL);
     #ifdef __TINYC__
         if (gs_current_thread_id < 0) exit(code);
+    #endif
+    #ifdef __EMSCRIPTEN_PTHREADS__
+        /* With threads main runs on a worker (PROXY_TO_PTHREAD), where
+           _Exit would end that worker alone: the browser's own thread ends
+           the program, and every worker with it. */
+        emscripten_force_exit(code);
     #endif
     _Exit(code);
 #endif

@@ -2627,8 +2627,8 @@ def main():
             if skipped:
                 r.say(f"skip wasm64 target ({skipped})")
             else:
-                r.ok("wasm64 target: samples built with Emscripten print under Node what they "
-                     "print natively, growth checks stop overruns in time, threads refused")
+                r.ok("wasm64 target: samples and the thread fixtures built with Emscripten print "
+                     "under Node what they print natively, growth checks stop overruns in time")
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             r.fail("wasm64 target", str(e))
     r.show_task(wasm_target)
@@ -2640,11 +2640,25 @@ def main():
             if skipped:
                 r.say(f"skip wasm64-web target ({skipped})")
             else:
-                r.ok("wasm64-web target: pages for samples, with arguments, files and input, "
-                     "print in a headless browser what they print natively; overruns stopped")
+                r.ok("wasm64-web target: pages for samples, with arguments, files, input and "
+                     "threads, print in a headless browser what they print natively; overruns "
+                     "stopped")
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             r.fail("wasm64-web target", str(e))
     r.show_task(wasm_web)
+
+    def wasm_web_gfx():
+        from wasm_web import check_wasm_web_gfx
+        try:
+            skipped = check_wasm_web_gfx(exe, gendir)
+            if skipped:
+                r.say(f"skip wasm64-web gfx ({skipped})")
+            else:
+                r.ok("wasm64-web gfx: the gfx, physics and ui samples draw through WebGPU in a "
+                     "headless browser and print what they print natively")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            r.fail("wasm64-web gfx", str(e))
+    r.show_task(wasm_web_gfx)
 
     def resource_paths():
         from resource_paths import check_resource_paths

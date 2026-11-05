@@ -42,14 +42,18 @@ inline string EmbeddedShaderPath(const string &from, string_view lit) {
 // compiler's message: "path:line: error: ..." for one at a line of
 // `source`, "path: ..." for one about the shader as a whole, and the
 // included file's name for one inside an include.
+// Set for --target wasm64-web, whose blobs carry WGSL (gfx_blob.h).
+inline bool web_shaders = false;
+
 inline string CompileShader(const string &source, const string &path, int stage) {
     // Compiled once per process for a stage, path and source: a language
     // server checks a program again at every change, and the shader
     // compiler is the slow part of a check.
     static map<tuple<int, string, string>, string> compiled;
-    auto key = make_tuple(stage, path, source);
+    auto key = make_tuple(stage + (web_shaders ? 16 : 0), path, source);
     if (auto it = compiled.find(key); it != compiled.end()) return it->second;
-    auto r = gs_shaderc_compile(source.c_str(), path.c_str(), stage);
+    auto r = web_shaders ? gs_shaderc_compile_web(source.c_str(), path.c_str(), stage)
+                         : gs_shaderc_compile(source.c_str(), path.c_str(), stage);
     if (!r.blob) {
         auto msg = string(r.error ? r.error : "shader compilation failed");
         gs_shaderc_free(&r);

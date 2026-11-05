@@ -287,10 +287,14 @@ inline bool BuildCMakePart(const Ast &ast, int pkg, const Builder &b, bool wantj
         throw CompileError { cat("cannot find `cmake` on PATH, needed to build the C part of the "
                                  "package ", p.name, " (target ", p.cmake_target, " of ", root,
                                  "/CMakeLists.txt). Install CMake 3.20 or later.") };
+    // WebAssembly (docs/design/wasm.md §8): the package built by Emscripten
+    // through its CMake toolchain file, as 64-bit wasm, with no JIT library.
+    auto wasm = b.opts.Wasm();
+    if (wasm) wantjit = false;
     #ifdef _WIN32
         // The MSVC environment (rc, link, the headers), for whichever
         // compiler builds it.
-        ImportVcvars(false);
+        if (!wasm) ImportVcvars(false);
     #endif
     auto wrapper = cat(out.dir, "/wrapper");
     auto builddir = cat(out.dir, "/cmake");
@@ -327,16 +331,33 @@ inline bool BuildCMakePart(const Ast &ast, int pkg, const Builder &b, bool wantj
         "    message(FATAL_ERROR \"the package ", p.name, "'s sidecar names the CMake target ",
         p.cmake_target, ", which ", root, "/CMakeLists.txt does not define\")\n"
         "endif()\n"
-        "# The JIT library: the symbol table pulls what it names out of the target.\n"
-        "add_library(", jitname, " SHARED \"", symsrc, "\")\n"
-        "target_link_libraries(", jitname, " PRIVATE ", p.cmake_target, ")\n"
-        "set_target_properties(", jitname, " PROPERTIES PREFIX \"\" OUTPUT_NAME \"", jitname, "\"\n"
-        "    LIBRARY_OUTPUT_DIRECTORY \"", out.dir, "\" RUNTIME_OUTPUT_DIRECTORY \"", out.dir, "\"\n"
-        "    LIBRARY_OUTPUT_DIRECTORY_RELEASE \"", out.dir, "\" RUNTIME_OUTPUT_DIRECTORY_RELEASE \"",
-        out.dir, "\")\n"
         "# A probe whose link line is the package's whole link closure.\n"
         "add_executable(goose_linkprobe \"", probesrc, "\")\n"
         "target_link_libraries(goose_linkprobe PRIVATE ", p.cmake_target, ")\n");
+    if (!wasm) {
+        Append(lists,
+            "# The JIT library: the symbol table pulls what it names out of the target.\n"
+            "add_library(", jitname, " SHARED \"", symsrc, "\")\n"
+            "target_link_libraries(", jitname, " PRIVATE ", p.cmake_target, ")\n"
+            "set_target_properties(", jitname, " PROPERTIES PREFIX \"\" OUTPUT_NAME \"", jitname, "\"\n"
+            "    LIBRARY_OUTPUT_DIRECTORY \"", out.dir, "\" RUNTIME_OUTPUT_DIRECTORY \"", out.dir, "\"\n"
+            "    LIBRARY_OUTPUT_DIRECTORY_RELEASE \"", out.dir, "\" RUNTIME_OUTPUT_DIRECTORY_RELEASE \"",
+            out.dir, "\")\n");
+    } else {
+        // SDL has no WebGPU driver for SDL_GPU: a package that builds SDL
+        // (gfx) gets the compiler's own (src/web/) as SDL's private driver.
+        auto web = WebBackendFiles();
+        Append(lists,
+            "# SDL_GPU over WebGPU (the Goose compiler's src/web/), SDL's private driver.\n"
+            "if(TARGET SDL3-static)\n"
+            "    get_target_property(goose_sdl_src SDL3-static SOURCE_DIR)\n"
+            "    target_sources(SDL3-static PRIVATE \"", web.c, "\")\n"
+            "    target_include_directories(SDL3-static PRIVATE \"${goose_sdl_src}/src\")\n"
+            "    target_compile_definitions(SDL3-static PRIVATE SDL_GPU_PRIVATE=1)\n"
+            "    target_link_options(goose_linkprobe PRIVATE \"SHELL:--js-library ", web.js,
+            "\" -sJSPI=1)\n"
+            "endif()\n");
+    }
     // What CMake's build goes by keeps its time unless it changed, so that a
     // build with nothing new compiles and relinks nothing: a JIT library
     // another process has loaded could not be written over on Windows.
@@ -351,7 +372,25 @@ inline bool BuildCMakePart(const Ast &ast, int pkg, const Builder &b, bool wantj
     }
     vector<string> argv = { cmake, "-S", wrapper, "-B", builddir, "-DCMAKE_BUILD_TYPE=Release" };
     auto ninja = NinjaPath();
-    if (!ninja.empty()) {
+    if (wasm) {
+        // Emscripten's toolchain file beside emcc, and 64-bit wasm, as the
+        // program is built (build.h).
+        if (ninja.empty())
+            throw CompileError { cat("building the C part of the package ", p.name, " for "
+                                     "WebAssembly needs Ninja on PATH (https://ninja-build.org)") };
+        argv.push_back("-G");
+        argv.push_back("Ninja");
+        argv.push_back(cat("-DCMAKE_MAKE_PROGRAM=", ninja));
+        argv.push_back(cat("-DCMAKE_TOOLCHAIN_FILE=", DirOf(b.tc.cc),
+                           "cmake/Modules/Platform/Emscripten.cmake"));
+        argv.push_back("-DCMAKE_C_FLAGS=-m64");
+        argv.push_back("-DCMAKE_CXX_FLAGS=-m64");
+        #ifdef _WIN32
+            // emcc.bat runs the Python EMSDK_PYTHON names, else PATH's.
+            if (!b.tc.runner.empty() && !getenv("EMSDK_PYTHON"))
+                _putenv_s("EMSDK_PYTHON", b.tc.runner.c_str());
+        #endif
+    } else if (!ninja.empty()) {
         argv.push_back("-G");
         argv.push_back("Ninja");
         argv.push_back(cat("-DCMAKE_MAKE_PROGRAM=", ninja));

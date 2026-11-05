@@ -60,6 +60,44 @@ typedef struct {
     uint8_t location;
     uint8_t type;                   /* GS_GFX_INPUT_* */
 } gs_gfx_blob_input;
+
+/* --target wasm64-web (docs/design/wasm.md §8, milestone 4): the browser
+   runs WGSL, which no SPIR-V reader there takes, so a web build's blob
+   holds in place of the SPIR-V a GSWG payload: this header, the bindings
+   the WGSL declares, then the WGSL text and a NUL. The gfx package hands
+   the "SPIR-V" bytes through SDL_GPU unchanged, and the WebGPU backend
+   (src/web/SDL_gpu_webgpu.c) reads them. The MSL and HLSL are left empty.
+   Native builds never see one. */
+#define GS_GFX_WGSL_MAGIC "GSWG"
+#define GS_GFX_WGSL_VERSION 1
+
+/* What a binding is, as cute_spirv's CSPV_WgslBindingKind. */
+enum {
+    GS_GFX_WGSL_SAMPLED_TEXTURE = 0, GS_GFX_WGSL_SAMPLER = 1, GS_GFX_WGSL_STORAGE_TEXTURE = 2,
+    GS_GFX_WGSL_STORAGE_BUFFER = 3, GS_GFX_WGSL_UNIFORM_BUFFER = 4,
+    GS_GFX_WGSL_SPLIT_LOAD_TEXTURE = 5,
+};
+
+typedef struct {
+    char magic[4];
+    uint32_t version;
+    uint32_t num_bindings;
+    uint32_t wgsl_size;             /* without its NUL */
+} gs_gfx_wgsl_header;
+
+typedef struct {
+    uint8_t group;                  /* @group: SDL_GPU's set */
+    uint8_t binding;                /* @binding */
+    uint8_t slot;                   /* the resource's binding in its set, in the GLSL */
+    uint8_t kind;                   /* GS_GFX_WGSL_* */
+    uint8_t dim;                    /* textures: 0 2d, 1 cube, 2 3d, 3 2d array */
+    uint8_t sample_type;            /* textures: 0 float, 1 uint, 2 depth */
+    uint8_t comparison;             /* samplers: a comparison sampler */
+    uint8_t access;                 /* storage: 0 read, 1 write, 2 read_write */
+    uint8_t store_binding;          /* split load textures: the storage texture's @binding */
+    uint8_t pad[3];
+    char format[20];                /* storage textures: the WGSL texel format */
+} gs_gfx_wgsl_binding;
 #pragma pack(pop)
 
 #endif

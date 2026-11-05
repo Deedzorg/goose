@@ -5,7 +5,30 @@
 // source unless -o says otherwise.
 #pragma once
 
+#include "web_backend.h"
+
 namespace goose {
+
+// The WebGPU backend for SDL_GPU (src/web/, embedded by CMakeLists.txt)
+// that a web page using gfx builds SDL with: its C, compiled into SDL, and
+// its JavaScript, a --js-library of the link. Written out on first use to
+// GOOSE_HOME/build/web/<hash of both>/, forward slashes.
+struct WebBackend {
+    string c, js;
+};
+
+inline WebBackend WebBackendFiles() {
+    string c((const char *)web_SDL_gpu_webgpu_c, web_SDL_gpu_webgpu_c_size);
+    string js((const char *)web_sdl_gpu_webgpu_js, web_sdl_gpu_webgpu_js_size);
+    auto dir = cat(GooseHome(), "/build/web/", Hex8(cat(c, "\n", js)));
+    for (auto &ch : dir) if (ch == '\\') ch = '/';
+    WebBackend w { cat(dir, "/SDL_gpu_webgpu.c"), cat(dir, "/sdl_gpu_webgpu.js") };
+    if (!PathExists(w.c) || !PathExists(w.js)) {
+        if (!WriteFileMakingDirs(w.c, c) || !WriteFileMakingDirs(w.js, js))
+            throw CompileError { cat("cannot write the WebGPU backend into ", dir) };
+    }
+    return w;
+}
 
 // In main.cpp: the runtime's text hash, the runtime object's C, and a path's directory.
 string RuntimeVersion();
@@ -20,6 +43,8 @@ struct BuildOptions {
     string exe;               // -o: the executable; "" puts it beside the root source
     string target;            // --target: "" for this machine, wasm64 or wasm64-web (Emscripten)
     vector<string> webfiles;  // --web-files: directories (src[@dst]) a web page's files hold
+    bool threads = false;     // wasm64: the program starts threads (-pthread, shared memory)
+    bool canvas = false;      // wasm64-web: the program draws (gfx), on the page's canvas
 
     bool Wasm() const { return target == "wasm64" || Web(); }
     bool Web() const { return target == "wasm64-web"; }
@@ -67,6 +92,8 @@ struct Builder {
         // 64-bit WebAssembly (memory64): pointers stay the 8 bytes every
         // layout the compiler computes assumes (docs/design/wasm.md).
         if (opts.Wasm()) f.push_back("-m64");
+        // Threads: atomics and shared memory in every object of the link.
+        if (opts.Wasm() && opts.threads) f.push_back("-pthread");
         if (opts.debug) f.push_back("-O0"), f.push_back("-g");
         else f.push_back("-O2");
         return f;
@@ -81,9 +108,28 @@ struct Builder {
     vector<string> WasmLinkFlags() const {
         vector<string> f = { "-sEXIT_RUNTIME=1", "-sALLOW_MEMORY_GROWTH=1",
                              "-sMAXIMUM_MEMORY=16GB", "-sSTACK_SIZE=8MB" };
+        // Threads (wasm.md §8, milestone 4): each Goose thread a pthread on
+        // a Web Worker over shared memory, and main itself on one, so that
+        // it may block in thread_wait and on queues, which a browser's own
+        // thread may not. A worker's native stack is Windows' 1 MB doubled.
+        // Workers for main and one thread per core start with the module,
+        // since a Web Worker takes milliseconds to load: a pool sized by
+        // hardware_threads() then starts at once.
+        if (opts.threads)
+            for (auto x : { "-pthread", "-sPROXY_TO_PTHREAD=1", "-sDEFAULT_PTHREAD_STACK_SIZE=2MB",
+                            "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency+1" })
+                f.push_back(x);
         if (opts.Web()) {
             for (auto x : { "-sENVIRONMENT=web", "-sMODULARIZE=1", "-sEXPORT_NAME=gooseProgram" })
                 f.push_back(x);
+            // A page that draws (gfx): SDL_GPU over WebGPU, whose JavaScript
+            // half waits for the GPU and for each frame by suspending the
+            // program (JSPI), so that its loop runs as it does natively.
+            if (opts.canvas) {
+                f.push_back("-sJSPI=1");
+                f.push_back("--js-library");
+                f.push_back(WebBackendFiles().js);
+            }
             for (auto &d : opts.webfiles) f.push_back("--preload-file"), f.push_back(d);
         } else {
             f.push_back("-sENVIRONMENT=node");
@@ -216,7 +262,8 @@ struct Builder {
 // built, after the builder said why.
 inline string RuntimeObject(const Builder &b) {
     auto dir = cat(GooseHome(), "/build/runtime/", RuntimeVersion(), "/", b.tc.id, "-",
-                   b.opts.debug ? "debug" : "release");
+                   b.opts.debug ? "debug" : "release",
+                   b.opts.Wasm() && b.opts.threads ? "-mt" : "");
     auto obj = cat(dir, "/goose_runtime.", b.tc.style == "msvc" ? "obj" : "o");
     if (PathExists(obj) && !b.opts.dryrun) return obj;
     auto src = cat(dir, "/goose_runtime.c");
@@ -286,9 +333,17 @@ inline int BuildExecutable(const string &rootfile, const string &cfile, const st
         // prog.html beside prog.js, which it loads by its own name.
         auto js = exe.size() > 3 && exe.compare(exe.size() - 3, 3, ".js") == 0;
         auto html = cat(exe.substr(0, exe.size() - (js ? 3 : 0)), ".html");
-        if (!WriteFileMakingDirs(html, WebPage(PathStem(rootfile), BaseName(exe)))) {
+        if (!WriteFileMakingDirs(html, WebPage(PathStem(rootfile), BaseName(exe), opts.threads,
+                                               opts.canvas))) {
             fprintf(msgs, "cannot write %s\n", html.c_str());
             return 1;
+        }
+        if (opts.threads) {
+            auto coi = cat(DirOf(html), "goose-coi.js");
+            if (!WriteFileMakingDirs(coi, web_coi_worker)) {
+                fprintf(msgs, "cannot write %s\n", coi.c_str());
+                return 1;
+            }
         }
         fprintf(msgs, "built %s and %s (serve the folder over http, for example with "
                       "python -m http.server, and open the page)\n", exe.c_str(), html.c_str());

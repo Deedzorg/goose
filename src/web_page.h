@@ -63,6 +63,12 @@ inline const char *const web_page_template = R"html(<!doctype html>
     background: var(--mono-bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px;
   }
   pre .err { color: var(--err); }
+  #screen { display: none; }
+  #screen.on { display: block; }
+  #canvas {
+    display: block; max-width: 100%; height: auto; margin: 0 auto; background: #000;
+    border-radius: 6px; outline: none;
+  }
 </style>
 </head>
 <body>
@@ -81,6 +87,11 @@ inline const char *const web_page_template = R"html(<!doctype html>
       <span id="status">Loading…</span>
     </div>
   </div>
+  <!-- What a program using gfx draws: the window it opens, which takes the
+       keyboard once clicked. -->
+  <div class="panel" id="screen">
+    <canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
+  </div>
   <div class="panel">
     <label>Output</label>
     <pre id="out" aria-live="polite"></pre>
@@ -90,6 +101,12 @@ inline const char *const web_page_template = R"html(<!doctype html>
 <script>
 "use strict";
 const q = new URLSearchParams(location.search);
+const THREADS = @THREADS@;
+// A program that draws (gfx) waits for each frame and for the GPU by
+// suspending (JSPI), so like a threaded one it runs on after the module's
+// promise, until onExit.
+const DRAWS = @DRAWS@;
+if (DRAWS) document.getElementById("screen").classList.add("on");
 const $ = id => document.getElementById(id);
 const out = $("out"), status = $("status"), runButton = $("run");
 
@@ -119,14 +136,21 @@ async function run() {
   const input = new TextEncoder().encode($("stdin").value);
   let pos = 0, code = null;
   const started = performance.now();
+  // The run ends at onExit: after the factory's promise without threads,
+  // and long after it with them, main running on a worker of its own.
+  let ended;
+  const exited = new Promise(resolve => { ended = resolve; });
   try {
     await gooseProgram({
       arguments: splitArgs($("args").value),
       print: t => { stdoutText += t + "\n"; show(t + "\n"); },
       printErr: t => { stderrText += t + "\n"; show(t + "\n", "err"); },
       stdin: () => (pos < input.length ? input[pos++] : null),
-      onExit: c => { code = c; },
-    });
+      onExit: c => { code = c; ended(); },
+      onAbort: e => { if (code === null) code = -1; ended(); },
+@CANVAS@    });
+    if (!THREADS && !DRAWS) ended();
+    await exited;
     if (code === null) code = 0;
   } catch (e) {
     if (e && e.name === "ExitStatus") code = e.status;
@@ -148,21 +172,69 @@ if (q.has("args")) {
 }
 if (q.has("stdin")) $("stdin").value = q.get("stdin");
 runButton.addEventListener("click", run);
-if (typeof gooseProgram !== "function") {
-  status.className = "bad";
-  status.textContent = "Could not load @SCRIPT@: serve this folder over http (python -m http.server) and open the page from there.";
-} else {
-  runButton.disabled = false;
-  status.textContent = "Ready";
-  if (q.has("run")) run();
+// Threads need shared memory, which a browser gives only a cross-origin
+// isolated page: one served with COOP and COEP headers. Where the server
+// sends none, goose-coi.js (a service worker beside the page) adds them,
+// and the page loads once more under it.
+async function isolate() {
+  if (!THREADS || self.crossOriginIsolated) return true;
+  if (!window.isSecureContext || !navigator.serviceWorker) return false;
+  if (navigator.serviceWorker.controller) return false;
+  await navigator.serviceWorker.register("goose-coi.js");
+  await navigator.serviceWorker.ready;
+  location.reload();
+  return null;
 }
+isolate().then(ok => {
+  if (ok === null) return;
+  if (typeof gooseProgram !== "function") {
+    status.className = "bad";
+    status.textContent = "Could not load @SCRIPT@: serve this folder over http (python -m http.server) and open the page from there.";
+  } else if (!ok) {
+    status.className = "bad";
+    status.textContent = "This program uses threads, which need a cross-origin isolated page: serve it from localhost or https, or with the headers Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp.";
+  } else {
+    runButton.disabled = false;
+    status.textContent = "Ready";
+    if (q.has("run")) run();
+  }
+}, e => {
+  status.className = "bad";
+  status.textContent = "Could not make the page cross-origin isolated: " + e;
+});
 </script>
 </body>
 </html>
 )html";
 
-// The page for the module script `script`, titled `title`.
-inline string WebPage(const string &title, const string &script) {
+// goose-coi.js, beside a page whose program uses threads: a service worker
+// that serves the folder with the headers that make a page cross-origin
+// isolated, which shared memory needs, for servers that send none of them.
+inline const char *const web_coi_worker = R"js(// Written by `goose build --target wasm64-web` for a program that uses
+// threads: their shared memory needs a cross-origin isolated page, and this
+// service worker adds the headers that make one (COOP and COEP) to what the
+// server sends. Servers that send them already make it unneeded.
+"use strict";
+self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", e => e.waitUntil(self.clients.claim()));
+self.addEventListener("fetch", e => {
+  const r = e.request;
+  if (r.cache === "only-if-cached" && r.mode !== "same-origin") return;
+  e.respondWith(fetch(r).then(res => {
+    if (res.status === 0) return res;
+    const h = new Headers(res.headers);
+    h.set("Cross-Origin-Opener-Policy", "same-origin");
+    h.set("Cross-Origin-Embedder-Policy", "require-corp");
+    h.set("Cross-Origin-Resource-Policy", "same-origin");
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
+  }));
+});
+)js";
+
+// The page for the module script `script`, titled `title`; `threads` when
+// the program starts threads, `canvas` when it draws (gfx).
+inline string WebPage(const string &title, const string &script, bool threads = false,
+                      bool canvas = false) {
     auto escape = [](const string &s) {
         string out;
         for (auto c : s) {
@@ -176,7 +248,10 @@ inline string WebPage(const string &title, const string &script) {
     };
     string page = web_page_template;
     for (auto [key, value] : { pair<string, string>("@TITLE@", escape(title)),
-                               pair<string, string>("@SCRIPT@", escape(script)) }) {
+                               pair<string, string>("@SCRIPT@", escape(script)),
+                               pair<string, string>("@THREADS@", threads ? "true" : "false"),
+                               pair<string, string>("@DRAWS@", canvas ? "true" : "false"),
+                               pair<string, string>("@CANVAS@", canvas ? "      canvas: $(\"canvas\"),\n" : "") }) {
         for (size_t at = page.find(key); at != string::npos; at = page.find(key, at + value.size()))
             page.replace(at, key.size(), value);
     }

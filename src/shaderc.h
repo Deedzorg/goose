@@ -21,6 +21,9 @@ typedef struct {
 /* Compiles `source` for `stage` (GS_GFX_STAGE_*). `path` names the file in
    error messages, and #include resolves relative to its directory. */
 gs_shaderc_result gs_shaderc_compile(const char *source, const char *path, int stage);
+/* The same for a web page (--target wasm64-web): the blob carries WGSL
+   (gs_gfx_wgsl_header, gfx_blob.h) where the SPIR-V goes, and no MSL or HLSL. */
+gs_shaderc_result gs_shaderc_compile_web(const char *source, const char *path, int stage);
 void gs_shaderc_free(gs_shaderc_result *r);
 
 #ifdef __cplusplus

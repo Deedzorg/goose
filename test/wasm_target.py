@@ -1,11 +1,16 @@
-"""`goose build --target wasm64` (docs/design/wasm.md, milestones 1 and 2): samples
-built as 64-bit WebAssembly with Emscripten and run under Node print what
-their native builds print, files and standard input included; the growth
+"""`goose build --target wasm64` (docs/design/wasm.md, milestones 1, 2 and 4):
+samples built as 64-bit WebAssembly with Emscripten and run under Node print
+what their native builds print, files and standard input included; the growth
 checks stop a data stack that outgrows its fixed slice of linear memory as
-it does (test/growth's programs); and what the target cannot do yet (threads, a
---target outside goose build, an unknown target) is refused with a message.
-Skipped where Emscripten (EMSDK, or emcc on PATH) or Node is missing."""
+it does (test/growth's programs); the thread fixtures (test/threads) print
+and abort as they do natively, workers being pthreads over shared memory, and
+a program that starts thread after thread reuses their stacks' memory; and
+what the target cannot do (a --target outside goose build, an unknown
+target) is refused with a message. Skipped where Emscripten (EMSDK, or emcc
+on PATH) or Node is missing."""
+import concurrent.futures
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,10 +19,42 @@ import toolchain as tc
 from growth_checks import GROWTH, WAD, check_overflow
 
 SAMPLES = tc.REPO_ROOT / "samples"
+TESTDIR = tc.REPO_ROOT / "test"
 
 # Arguments, standard input, a C header and files read through the os module
-# between them.
-CHECKED_SAMPLES = ["01_tour", "15_word_freq", "17_calc", "18_json", "24_call_c", "26_file_tree"]
+# between them; and a pool of worker threads.
+CHECKED_SAMPLES = ["01_tour", "15_word_freq", "17_calc", "18_json", "24_call_c", "26_file_tree",
+                   "23_mandelbrot_threads"]
+
+# test/threads fixtures that do not hold for wasm64, and why.
+THREAD_FIXTURES_SKIPPED = {
+    # Its budget is sized for native 2 GB regions; wasm64's are 64 MB.
+    "thread_cap",
+    # V8 ends a native recursion that deep with its own "Maximum call stack
+    # size exceeded" before the runtime can report it (as for main).
+    "thread_stack_overflow",
+}
+
+# Thread after thread, each with stacks of its own: without their regions
+# reused, 300 of them would take 39 GB of a 16 GB memory.
+MANY_THREADS = """import std;
+
+thread_fn worker(n: i64) {
+    var parts: u8[>..] = [];
+    for i in n { parts.append("ab"); }
+    qput(parts.len);
+}
+
+fn main() {
+    var total = 0;
+    for i in 300 {
+        let id = thread_spawn(worker, i % 7);
+        total += qget<i64>();
+        thread_wait(id);
+    }
+    print(total);
+}
+"""
 
 OVERRUN = """import std;
 import os;
@@ -56,6 +93,40 @@ def _build(exe, src, out, extra=()):
     for f in (out, out.with_suffix(".wasm")):
         if not f.exists():
             raise RuntimeError(f"goose build --target wasm64 wrote no {f.name}")
+
+
+def check_thread_fixtures(exe, work):
+    """Every test/threads fixture but THREAD_FIXTURES_SKIPPED, as wasm64 under
+    Node: its stdout as expected/<name>.out, and where expected/<name>.aborts
+    says it aborts, a failing exit with expected/<name>.stderr's text."""
+    expected = TESTDIR / "expected"
+
+    def one(src):
+        first = src.read_text(encoding="utf-8").split("\n", 1)[0]
+        defines = ["-D" + d for d in re.findall(r"^// runtime-define: (\w+=\w+)$", first)]
+        js = work / f"threads_{src.stem}.js"
+        _build(exe, src, js, defines)
+        r = _run(["node", str(js)], cwd=src.parent, timeout=120)
+        out, err = tc.decode(r.stdout), tc.decode(r.stderr)
+        aborts = (expected / f"{src.stem}.aborts").exists()
+        wrong = []
+        want = expected / f"{src.stem}.out"
+        if want.exists() and out != tc.decode(want.read_bytes()):
+            wrong.append("stdout is not expected/" + want.name)
+        if aborts != (r.returncode != 0):
+            wrong.append(f"exit code {r.returncode}")
+        stderr = expected / f"{src.stem}.stderr"
+        if aborts and stderr.exists() and tc.decode(stderr.read_bytes()).strip() not in err:
+            wrong.append("stderr lacks expected/" + stderr.name)
+        if wrong:
+            raise RuntimeError(f"test/threads/{src.name} as wasm64: {', '.join(wrong)}:\n"
+                               f"{(out + err)[:2000]}")
+
+    fixtures = [f for f in sorted((TESTDIR / "threads").glob("*.goose"))
+                if f.stem not in THREAD_FIXTURES_SKIPPED]
+    with concurrent.futures.ThreadPoolExecutor(max(1, min(6, (os.cpu_count() or 2) // 2))) as ex:
+        for f in ex.map(one, fixtures):
+            pass
 
 
 def check_wasm_target(exe, gendir):
@@ -97,9 +168,21 @@ def check_wasm_target(exe, gendir):
     if r.returncode != 0 or tc.decode(r.stdout).strip() != "300000":
         raise RuntimeError(f"300000 bytes in a 64 MB stack failed (exit {r.returncode}):\n{_text(r)}")
 
+    check_thread_fixtures(exe, work)
+    many = work / "many_threads.goose"
+    many.write_text(MANY_THREADS)
+    _build(exe, many, work / "many_threads.js", ["-DGS_STACK_STATS=1"])
+    r = _run(["node", str(work / "many_threads.js")])
+    expected = str(sum(2 * (i % 7) for i in range(300)))
+    if r.returncode != 0 or tc.decode(r.stdout).strip() != expected:
+        raise RuntimeError(f"300 threads one after another (exit {r.returncode}) did not print "
+                           f"{expected}:\n{_text(r)[:2000]}")
+    # Memory that ran out would have halved the regions instead (gs_reserve_region).
+    last = [l for l in tc.decode(r.stderr).splitlines() if l.startswith("goose stack stats: worker 299:")]
+    if not last or "reserving 64 MB each" not in last[0]:
+        raise RuntimeError(f"the 300th thread did not get 64 MB regions:\n{last or _text(r)[-2000:]}")
+
     refusals = [
-        ([str(exe), "build", "--target", "wasm64", str(SAMPLES / "23_mandelbrot_threads.goose"),
-          "-o", str(work / "threads.js")], "does not support threads"),
         ([str(exe), "run", "--target", "wasm64", str(src)], "--target is for goose build"),
         ([str(exe), "build", "--target", "wasm32", str(src)],
          "--target takes native, wasm64 or wasm64-web"),

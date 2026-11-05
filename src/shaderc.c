@@ -193,8 +193,53 @@ static char *check_bindings(const char *path, int stage, const CSPV_Reflection *
     return err;
 }
 
-/* The blob, per src/gfx_blob.h. */
-static unsigned char *write_blob(int stage, const CSPV_Result *r, size_t *size) {
+/* A web build's payload in place of the SPIR-V (gs_gfx_wgsl_header): the
+   bindings the WGSL declares, then the WGSL and a NUL. */
+static unsigned char *wgsl_payload(const CSPV_Result *r, size_t *size) {
+    const CSPV_Reflection *rf = &r->reflection;
+    int nb = (int)asize(rf->wgsl_bindings);
+    size_t wlen = strlen(r->wgsl);
+    *size = sizeof(gs_gfx_wgsl_header) + sizeof(gs_gfx_wgsl_binding) * (size_t)nb + wlen + 1;
+    unsigned char *out = (unsigned char *)calloc(1, *size);
+    gs_gfx_wgsl_header h;
+    memset(&h, 0, sizeof h);
+    memcpy(h.magic, GS_GFX_WGSL_MAGIC, 4);
+    h.version = GS_GFX_WGSL_VERSION;
+    h.num_bindings = (uint32_t)nb;
+    h.wgsl_size = (uint32_t)wlen;
+    memcpy(out, &h, sizeof h);
+    unsigned char *p = out + sizeof h;
+    for (int i = 0; i < nb; i++) {
+        const CSPV_WgslBinding *w = &rf->wgsl_bindings[i];
+        gs_gfx_wgsl_binding b;
+        memset(&b, 0, sizeof b);
+        b.group = (uint8_t)w->set;
+        b.binding = (uint8_t)w->binding;
+        b.slot = (uint8_t)w->slot;
+        b.kind = (uint8_t)w->kind;
+        b.dim = (uint8_t)w->dim;
+        b.sample_type = (uint8_t)w->sample_type;
+        b.comparison = (uint8_t)w->comparison;
+        b.access = (uint8_t)w->access;
+        b.store_binding = 0xff;
+        if (w->kind == CSPV_WGSL_SPLIT_LOAD_TEXTURE)
+            for (int k = 0; k < (int)asize(rf->wgsl_splits); k++)
+                if (rf->wgsl_splits[k].set == w->set && rf->wgsl_splits[k].load_binding == w->binding)
+                    b.store_binding = (uint8_t)rf->wgsl_splits[k].store_binding;
+        if (w->format) {
+            size_t n = strlen(w->format);
+            memcpy(b.format, w->format, n < sizeof b.format - 1 ? n : sizeof b.format - 1);
+        }
+        memcpy(p, &b, sizeof b);
+        p += sizeof b;
+    }
+    memcpy(p, r->wgsl, wlen);
+    return out;
+}
+
+/* The blob, per src/gfx_blob.h; for the web, with the WGSL payload where
+   the SPIR-V goes and empty MSL and HLSL. */
+static unsigned char *write_blob(int stage, const CSPV_Result *r, int web, size_t *size) {
     const CSPV_Reflection *rf = &r->reflection;
     gs_gfx_blob_header h;
     memset(&h, 0, sizeof h);
@@ -215,11 +260,13 @@ static unsigned char *write_blob(int stage, const CSPV_Result *r, size_t *size) 
     }
     int nu = (int)asize(rf->uniform_blocks);
     h.num_uniform_buffers = (uint16_t)nu;
-    size_t msl_len = strlen(r->msl), hlsl_len = strlen(r->hlsl);
+    size_t msl_len = web ? 0 : strlen(r->msl), hlsl_len = web ? 0 : strlen(r->hlsl);
+    size_t wsize = 0;
+    unsigned char *wgsl = web ? wgsl_payload(r, &wsize) : NULL;
     size_t off = sizeof h + 4 * (size_t)nu + sizeof(gs_gfx_blob_input) * (size_t)ninputs;
     off = (off + 3) & ~(size_t)3;
     h.spirv_offset = (uint32_t)off;
-    h.spirv_size = (uint32_t)(r->word_count * 4);
+    h.spirv_size = (uint32_t)(web ? wsize : r->word_count * 4);
     off += h.spirv_size;
     h.msl_offset = (uint32_t)off;
     h.msl_size = (uint32_t)msl_len;
@@ -246,9 +293,12 @@ static unsigned char *write_blob(int stage, const CSPV_Result *r, size_t *size) 
         memcpy(p, &in, sizeof in);
         p += sizeof in;
     }
-    memcpy(blob + h.spirv_offset, r->spirv, h.spirv_size);
-    memcpy(blob + h.msl_offset, r->msl, msl_len);
-    memcpy(blob + h.hlsl_offset, r->hlsl, hlsl_len);
+    memcpy(blob + h.spirv_offset, web ? (const void *)wgsl : (const void *)r->spirv, h.spirv_size);
+    if (!web) {
+        memcpy(blob + h.msl_offset, r->msl, msl_len);
+        memcpy(blob + h.hlsl_offset, r->hlsl, hlsl_len);
+    }
+    free(wgsl);
     *size = off;
     return blob;
 }
@@ -274,7 +324,8 @@ static char *check_inputs(const char *path, const CSPV_Reflection *rf) {
     return NULL;
 }
 
-gs_shaderc_result gs_shaderc_compile(const char *source, const char *path, int stage) {
+static gs_shaderc_result shaderc_compile(const char *source, const char *path, int stage,
+                                         int web) {
     gs_shaderc_result res;
     memset(&res, 0, sizeof res);
     shaderc_includes inc;
@@ -291,8 +342,9 @@ gs_shaderc_result gs_shaderc_compile(const char *source, const char *path, int s
     opts.include_resolve = shaderc_include;
     opts.display_name = shaderc_display;
     opts.user = &inc;
-    opts.emit_hlsl = true;
-    opts.emit_msl = true;
+    opts.emit_hlsl = !web;
+    opts.emit_msl = !web;
+    opts.emit_wgsl = web != 0;
     CSPV_Stage cs = stage == GS_GFX_STAGE_VERTEX ? CSPV_STAGE_VERTEX
                   : stage == GS_GFX_STAGE_FRAGMENT ? CSPV_STAGE_FRAGMENT : CSPV_STAGE_COMPUTE;
     CSPV_Result r = cspv_compile_ex(source, cs, &opts);
@@ -304,7 +356,7 @@ gs_shaderc_result gs_shaderc_compile(const char *source, const char *path, int s
     } else {
         res.error = check_bindings(path, stage, &r.reflection);
         if (!res.error && stage == GS_GFX_STAGE_VERTEX) res.error = check_inputs(path, &r.reflection);
-        if (!res.error) res.blob = write_blob(stage, &r, &res.size);
+        if (!res.error) res.blob = write_blob(stage, &r, web, &res.size);
     }
     cspv_free(&r);
     for (int i = 0; i < inc.count; i++) {
@@ -315,6 +367,14 @@ gs_shaderc_result gs_shaderc_compile(const char *source, const char *path, int s
     free(inc.names);
     free(inc.dir);
     return res;
+}
+
+gs_shaderc_result gs_shaderc_compile(const char *source, const char *path, int stage) {
+    return shaderc_compile(source, path, stage, 0);
+}
+
+gs_shaderc_result gs_shaderc_compile_web(const char *source, const char *path, int stage) {
+    return shaderc_compile(source, path, stage, 1);
 }
 
 void gs_shaderc_free(gs_shaderc_result *r) {

@@ -15,11 +15,12 @@
 
 </details>
 
-Milestones 1 to 3 of the plan in [§8](#8-status-and-staged-plan) are
+Milestones 1 to 4 of the plan in [§8](#8-status-and-staged-plan) are
 implemented on the fork branch `feature/wasm`: `goose build --target wasm64`
-with fixed partitions, the growth checks of §2 (`GS_GROWTH_CHECKS`), and
-`--target wasm64-web` with a page that runs the program in a browser. The
-rest is a proposal. Spec §10.4 says that platforms
+with fixed partitions, the growth checks of §2 (`GS_GROWTH_CHECKS`),
+`--target wasm64-web` with a page that runs the program in a browser, and
+threads on both and the gfx package on the web, through WebGPU. The rest is a
+proposal. Spec §10.4 says that platforms
 without address-space reservation fall back to "index-based references +
 bounds-checked growth", and leaves the details open (open issue 15). This
 note works them out. Its cost figures are estimates, not measurements.
@@ -244,6 +245,7 @@ node prog.js args...
   no check stopped as a Goose bug.
 * **Refused with a message:** threads (`cg.usesthreads`), packages with
   native parts (gfx, physics, ui, audio), `--target` outside `goose build`.
+  Milestone 4 lifted the first two.
 * **Test:** `test/wasm_target.py`, run by `test/run_tests.py`; skipped
   without Emscripten or Node. It builds six samples that cover arguments,
   stdin, files, a C header and JSON, compares them with `samples/expected/`,
@@ -340,15 +342,127 @@ python -m http.server                                         # then open prog.h
 * **Not yet:** no page can hand the program a file of the viewer's own, and
   `goose build` does not serve the page itself; both are small additions.
 
-### Milestone 4: more of the language and the libraries
+### Milestone 4: threads and gfx (done)
 
-* Threads: `-pthread` with shared memory (cross-origin isolated pages in
-  browsers, always in Node), each worker's regions taken the same way.
-* gfx through WebGPU (Emscripten's `webgpu.h`, or SDL3's Emscripten port) and
-  canvas input, then ui and physics.
+```
+goose build --target wasm64 23_mandelbrot_threads.goose        # node 23_mandelbrot_threads.js
+goose build --target wasm64-web 27_gfx_cube.goose               # draws on the page's canvas
+```
+
+**Threads.** A program that starts threads or uses queues (`cg.usesthreads`)
+builds and links with `-pthread`: each Goose thread is a pthread on a Web
+Worker (a Node worker under Node) over shared memory, with the runtime's
+POSIX path unchanged.
+
+* **Main on a worker** (`-sPROXY_TO_PTHREAD`): `thread_wait` and queue waits
+  block, which a browser's own thread may not, so `main` runs on a worker
+  and the browser's thread stays free to start the others. A pool of
+  workers, one per core and one for main
+  (`-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency+1`), loads with the
+  module: a Web Worker takes milliseconds to start, which on demand made
+  the threads sample slower than its serial run. A worker's native stack
+  is 2 MB (`-sDEFAULT_PTHREAD_STACK_SIZE`).
+* **Ending.** `_Exit` from a pthread ends only that worker, so `gs_end`
+  calls `emscripten_force_exit`, which ends the program on the browser's
+  thread, every worker with it: aborts in main or in a worker exit as they
+  do natively.
+* **Regions are reused.** Linear memory is never given back, and a worker
+  takes its own regions, so a released region goes on a free list for the
+  next reservation of its size (`gs_os_reserve`), its guard gap scanned
+  first: a worker's gap is now checked as it ends, where before only
+  main's was, at exit. Without reuse, 300 threads one after another would
+  need 39 GB of a 16 GB memory. What a region held stays in it; Goose has no
+  read path to a slot that was never written (spec §5.3).
+* **Budget.** `GS_STACK_BUDGET` is 12 GB for wasm64 (the rest of the 16 GB
+  for the C heap, native stacks and the module), which is what caps
+  `hardware_threads()` there, and the runtime object is cached apart for
+  `-pthread` builds (`-mt`).
+* **Pages.** Shared memory needs a cross-origin isolated page (headers
+  `Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Embedder-Policy: require-corp`). `python -m http.server`
+  sends neither, so a threaded build writes `goose-coi.js` beside the page,
+  a service worker that adds them; the page registers it and loads once
+  more under it. A server that sends the headers makes it unneeded. Either
+  way the page waits for `onExit`, not the module's promise, since main
+  runs on.
+* **Tests.** `test/wasm_target.py` runs the threads sample and every
+  `test/threads` fixture under Node and compares them with
+  `test/expected/` (stdout, the exit, and stderr for those that abort), all
+  but two: `thread_cap` (its budget is sized for native 2 GB regions) and
+  `thread_stack_overflow` (V8 ends a native recursion that deep with its own
+  "Maximum call stack size exceeded" before the runtime can report it; the
+  same holds for main without threads). It also starts 300 threads one
+  after another and checks the last still gets 64 MB regions.
+  `test/wasm_web.py` opens the threads sample twice, served with the
+  headers and without them (the service worker's way).
+* **Speed.** Starting 12 threads that do nothing takes about 1 ms under Node
+  (0.7 ms native). But on this PC (Ryzen 5 2600, 6 cores) compute does not
+  scale under Node 24: 12 threads each running the same loop take about
+  2.5 times as long as one, where natively they take about the same, and
+  the threads sample's pool takes ~180 ms against 50 ms serial (native: 5
+  ms against 35). Nothing is shared in the loop; it looks like V8's, not
+  Goose's, and is worth measuring in browsers and on other machines.
+
+**gfx.** SDL 3.4 has no WebGPU driver for SDL_GPU, so the compiler carries
+one: `src/web/SDL_gpu_webgpu.c` (an SDL_GPU backend, about 1,500 lines)
+and `src/web/sdl_gpu_webgpu.js` (its JavaScript half over `navigator.gpu`, about 570),
+embedded at the compiler's build (CMakeLists.txt) and written under
+`GOOSE_HOME/build/web/<hash>/` on use. The gfx package itself is unchanged.
+
+* **Shaders.** A web build compiles each `embed_shader` with cute_spirv's
+  WGSL backend (`gs_shaderc_compile_web`), and the blob carries, where the
+  SPIR-V goes, a `GSWG` payload: the bindings and the WGSL (`gfx_blob.h`).
+  The package hands those bytes to `SDL_CreateGPUShader` as SPIR-V, unread,
+  and the backend reads them. MSL and HLSL are left out. Native blobs are
+  unchanged.
+* **The build.** The package's C (SDL, the gfx, ui and audio layers;
+  physics too) is built by Emscripten through its CMake toolchain file and
+  Ninja, as 64-bit wasm (`BuildCMakePart`); for a package that builds SDL,
+  the wrapper adds the backend to `SDL3-static` and defines
+  `SDL_GPU_PRIVATE`, which makes SDL_GPU take it as its private driver
+  (`PrivateGPUDriver`). SDL's own validation stays in front of it. About
+  75 s the first time, cached after.
+* **Waiting** without blocking the page: the device, every frame and every
+  read back are asynchronous in WebGPU, so the program is linked with
+  `-sJSPI` and those calls suspend it (JavaScript Promise Integration,
+  Chrome 137 and later): `SDL_WaitAndAcquireGPUSwapchainTexture` waits for
+  the browser's next animation frame, which paces the loop to the display
+  and lets the page deliver input, and `gfx::frame()` loops run as they do
+  natively.
+* **Binding.** SDL_GPU's sets are the WGSL's groups (vertex 0 and 1,
+  fragment 2 and 3, compute 0 to 2). Resource groups become bind groups
+  made at the draw that needs them; uniform pushes go to a 4 MB ring, 256
+  bytes apart, written to the GPU as their command buffer is submitted and
+  bound with dynamic offsets. Uploads and downloads go through staging
+  buffers in the command encoder, in order with the rest, rows padded to
+  WebGPU's 256 bytes; a download lands in its transfer buffer when its
+  submission's fence settles, which `SDL_WaitForGPUFences`, `WaitForGPUIdle`
+  and mapping a download buffer wait for. Blits and mipmaps are a triangle
+  through a small WGSL pipeline.
+* **The page** shows a canvas (`#canvas`, SDL's) when the program uses gfx,
+  and waits for `onExit`. A browser with no WebGPU adapter gets gfx's own
+  message (`gfx: no GPU device: ...`).
+* **Refused:** gfx for `--target wasm64` (Node has no canvas), and gfx with
+  threads in one program (JSPI and a main on a worker do not mix yet).
+* **Not done:** read-write storage images that WebGPU cannot bind as one
+  (cute_spirv splits them; the backend refuses such a shader), compute
+  samplers' fine points, MSAA beyond 4 samples, `rgba32float` filtering
+  without the device feature, wireframe fill.
+* **Tests.** `test/wasm_web.py`'s `check_wasm_web_gfx`: the five samples
+  that draw (cube, physics boxes, ui to-do, mini Minecraft with its own
+  checks, mini Doom with the Freedoom map packed by `--web-files`), each run
+  with its native test arguments in headless Chrome with WebGPU, print
+  their `samples/expected/` output, which for each includes reading the
+  last frame back from the GPU and saving it as a PNG; and the two
+  refusals. Skipped where the browser gives no adapter. All pass on Windows
+  with Chrome 156 on the Radeon RX 580.
+
+### Still to do
+
 * `-msimd128`, and a look at what keeps the image filters slow.
 * `goose toolchain` reporting Emscripten, and `--target` in Goose Studio
   (build for the web from the IDE).
+* gfx with threads; files a program writes offered to the viewer to save.
 
 ### Milestone 5: wasm32 and WASI
 
