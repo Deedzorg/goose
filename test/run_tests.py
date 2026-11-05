@@ -119,6 +119,11 @@ def debug_fixture(f, line):
     return f.stem == "codegen_exec" or "runtime-debug" in line
 
 
+def fixture_levels(levels, line):
+    """Selected optimizer regressions exercise O1 as well as the profile levels."""
+    return tuple(sorted(set(levels) | {"1"})) if "all-levels" in line else levels
+
+
 def has_bce_annotations(f):
     return bool(re.search(r"//\s*bce:(?:elide|keep)\b", f.read_text(encoding="utf-8")))
 
@@ -760,11 +765,11 @@ class Runner:
         program in-process: --jit with -o."""
         name = f.stem
         res.modules = modules = native_modules(f, self.native)
-        levels = self.levels if self.cc else ()
+        levels = fixture_levels(self.levels, line) if self.cc else ()
         # A native module's fixture runs in-process only where the package
         # is compiled in; the compiler would otherwise build the package.
         available = all(self.native[m] for m in modules)
-        res.jitlevels = jitlevels = ("0", "2") if self.jit and available and \
+        res.jitlevels = jitlevels = fixture_levels(("0", "2"), line) if self.jit and available and \
             "no-jit" not in line else ()
         gen, cfiles = res.gen, res.c
         with self.into(res.cgen):
@@ -819,7 +824,7 @@ class Runner:
         judges the program's TinyCC runs."""
         name = f.stem
         modules = res.modules
-        levels = self.levels if self.cc else ()
+        levels = fixture_levels(self.levels, first_line(f)) if self.cc else ()
         jitlevels, gen, cfiles = res.jitlevels, res.gen, res.c
         if levels:
             with self.into(res.cgen):
@@ -1016,6 +1021,7 @@ class Runner:
         # Guarded base-case inlining: a copy of the body's first statement
         # per self-call site the rewrite took.
         copies = {
+            "gb_callback": 3 if optimized else 1,
             "gb_build": 3 if optimized else 1,
             "gb_walk": 2 if optimized else 1,
             "gb_count": 3 if optimized else 1,
@@ -1067,6 +1073,34 @@ class Runner:
             if (name in live) != want:
                 self.fail(f"inlining heuristics {level} {name}",
                           f"left out of line: got {name in live}, want {want}")
+                valid = False
+        return valid
+
+    def check_abandoned_accumulator(self, level, specs):
+        bodies = {}
+        for spec in specs.split("// spec ")[1:]:
+            match = re.search(r"^fn (\w+)\([^\n]*\) \{\n", spec, re.MULTILINE)
+            if match:
+                bodies[match[1]] = spec[match.end():]
+        optimized = level != "-O0"
+        shapes = {
+            "leave_arg": (False, True),
+            "leave_block": (optimized, True),
+            "leave_mixed": (optimized, True),
+            "leave_sequence": (optimized, True),
+            "safe_block": (optimized, not optimized),
+            "safe_plain_block": (optimized, not optimized),
+        }
+        valid = True
+        for name, want in shapes.items():
+            body = bodies.get(name)
+            got = None if body is None else (
+                bool(re.search(r"\bloop \{", body)),
+                bool(re.search(rf"\b{name}\(", body)),
+            )
+            if got != want:
+                self.fail(f"abandoned-accumulator {level} {name}",
+                          f"(loop, self call): got {got}, want {want}")
                 valid = False
         return valid
 
@@ -1667,6 +1701,16 @@ def main():
     for lvl in ("-O0", "-O1", "-O2"):
         r.show_task(optimize, lvl)
 
+    def abandoned_accumulator(lvl):
+        code, out, err = r.goose(lvl, "--check", "--specs",
+                                 HERE / "optimizer" / "tre_abandoned_accumulator.goose")
+        if code != 0:
+            r.fail(f"abandoned-accumulator {lvl}", out + err)
+        elif r.check_abandoned_accumulator(lvl, out):
+            r.ok(f"abandoned-accumulator {lvl}")
+    for lvl in ("-O0", "-O1", "-O2"):
+        r.show_task(abandoned_accumulator, lvl)
+
     # The data stack report (--stacks): a program with a worker, whose
     # first-line budget caps the workers at one, a recursive one whose
     # first-line GS_MAX_STACKS the compiler checks the count against, and one
@@ -1748,6 +1792,149 @@ def main():
         else:
             r.ok(f"member parameters {f.name}")
     r.show_task(member_params)
+    # Root descriptors expose ordinary component metadata to top caching and
+    # loop-view hoisting, even when Goose leaves the helper out of line.
+    def root_owner_caches():
+        cfile = gendir / "root_owner_caches-shapes.c"
+        code, out, err = r.goose("-O0", "-o", cfile, HERE / "codegen" / "root_owner_caches.goose")
+        if code != 0:
+            r.fail("root owner caches", out + err)
+            return
+        text = cfile.read_text()
+        def body(name):
+            match = re.search(rf"^static [^\n;]*\b{name}_g\w*\([^\n]*\) \{{\n(.*?)^\}}\n",
+                              text, re.MULTILINE | re.DOTALL)
+            return match[1] if match else ""
+        grow, summation = body("grow"), body("sum")
+        prefix, _, loop = grow.partition("for (")
+        cached = all(re.search(rf"uint8_t \*\w+ = .*\.{f}_g\.stk->top;", prefix)
+                     and re.search(rf"int64_t \w+ = .*\.{f}_g\.hdr->len;", prefix)
+                     for f in ("first", "second"))
+        hoisted = all(s in summation.partition("for (")[0] for s in ("hdr->base", "hdr->len"))
+        # All header reads/writes in grow's loop use the caches, and sum's
+        # indexed load no longer goes through a descriptor or bounds check.
+        growth_body = loop.partition("\n    }")[0]
+        read_body = summation.partition("for (")[2].partition("\n    }")[0]
+        if not cached or not hoisted or "hdr->" in growth_body or "hdr->" in read_body:
+            r.fail("root owner caches", grow + summation)
+        else:
+            r.ok("root owner caches")
+    r.show_task(root_owner_caches)
+    def bulk_default_loops():
+        cfile = gendir / "bulk-default-loops-shapes.c"
+        code, out, err = r.goose("-O0", "-o", cfile, HERE / "codegen" / "bulk_default_loops.goose")
+        if code != 0:
+            r.fail("bulk default loops", out + err)
+            return
+        text = cfile.read_text()
+        bodies = re.findall(r"^static [^\n;]*\b(?:grow|fill)_g\w*\([^\n]*\) \{\n(.*?)^\}\n",
+                            text, re.MULTILINE | re.DOTALL)
+        bulk = [b for b in bodies if "GS_MEMZERO" in b and "for (" not in b]
+        effects = [b for b in bodies if "next_g" in b and "for (" in b]
+        if len(bulk) != 4 or len(effects) != 2:
+            r.fail("bulk default loops", "\n".join(bodies))
+        else:
+            r.ok("bulk default loops")
+    r.show_task(bulk_default_loops)
+    # Inlined helpers and chains of immutable root aliases keep one spelling
+    # of each component. This caller remains out of line (multiple results).
+    def root_alias_caches():
+        cfile = gendir / "root_alias_caches-shapes.c"
+        code, out, err = r.goose("-O2", "-o", cfile, HERE / "codegen" / "root_alias_caches.goose")
+        if code != 0:
+            r.fail("root alias caches", out + err)
+            return
+        text = cfile.read_text()
+        match = re.search(r"^static [^\n;]*\bgrow_g\w*\([^\n]*\) \{\n(.*?)^\}\n",
+                          text, re.MULTILINE | re.DOTALL)
+        body = match[1] if match else ""
+        prefix, _, loop = body.partition("for (")
+        cached = all(re.search(rf"uint8_t \*\w+ = .*\.{f}_g\.stk->top;", prefix)
+                     and re.search(rf"int64_t \w+ = .*\.{f}_g\.hdr->len;", prefix)
+                     for f in ("first", "second"))
+        # No aliases or metadata traffic in the inlined loop; bounds/runtime
+        # checks elsewhere are unaffected by this representation change.
+        loop = loop.partition("\n    }")[0]
+        if not cached or "hdr->" in loop or "stk->" in loop or "State_g *" in loop:
+            r.fail("root alias caches", body)
+        else:
+            r.ok("root alias caches")
+    r.show_task(root_alias_caches)
+    # A known owner survives out-of-line calls and recursive forwarding;
+    # merged, mutable and local owners still use the descriptor interface.
+    def root_call_identity():
+        for opt in (0, 2):
+            cfile = gendir / f"root_call_identity-O{opt}-shapes.c"
+            code, out, err = r.goose(f"-O{opt}", "-o", cfile, HERE / "codegen" / "root_call_identity.goose")
+            if code != 0:
+                r.fail(f"root call identity O{opt}", out + err)
+                continue
+            text = cfile.read_text()
+            def bodies(name):
+                return re.findall(rf"^static [^\n;]*\b{name}_g\w*\([^\n]*\) \{{\n(.*?)^\}}\n",
+                                  text, re.MULTILINE | re.DOTALL)
+            direct = bodies("known") + bodies("descend")
+            generic = bodies("shared") + bodies("shared_recursive") + bodies("dynamic")
+            if (len(direct) < 2 or not all("gs_component_one_g_" in b and "hdr->" not in b for b in direct)
+                    or len(generic) < 3 or not all("hdr->" in b for b in generic)):
+                r.fail(f"root call identity O{opt}", "\n".join(direct + generic))
+            else:
+                r.ok(f"root call identity O{opt}")
+    r.show_task(root_call_identity)
+    def root_call_caches():
+        cfile = gendir / "root_call_caches-shapes.c"
+        code, out, err = r.goose("-O2", "-o", cfile, HERE / "codegen" / "root_call_caches.goose")
+        if code != 0:
+            r.fail("root call caches", out + err)
+            return
+        text = cfile.read_text()
+        def body(name):
+            match = re.search(rf"^static [^\n;]*\b{name}_g\w*\([^\n]*\) \{{\n(.*?)^\}}\n",
+                              text, re.MULTILINE | re.DOTALL)
+            return match[1] if match else ""
+        ok = True
+        for name in ("pair", "direct"):
+            prefix, _, loop = body(name).partition("for (")
+            ok &= len(re.findall(r"uint8_t \*\w+ = .*->top;", prefix)) == 1
+            ok &= len(re.findall(r"int64_t \w+ = .*\.len;", prefix)) == 1
+            ok &= "GS_GL" not in loop.partition("\n    }")[0]
+        outer = body("outer")
+        before, call, after = outer.partition(" = inner_g(")
+        ok &= bool(call)
+        for component in (0, 1):
+            stack = rf"\(&GS_GL->gs_gstk_gs_component_state_g_{component}\)->top"
+            length = rf"GS_GL->gs_component_state_g_{component}\.len"
+            ok &= bool(re.search(stack + r" = \w+;", before) and re.search(length + r" = \w+;", before))
+            ok &= bool(re.search(r"\w+ = " + stack + ";", after) and re.search(r"\w+ = " + length + ";", after))
+        mixed = body("mixed").partition("for (")[2].partition("\n    }")[0]
+        ok &= "gs_gstk_gs_component_state_g_0)->top" in mixed and ".stk->top" in mixed
+        if ok:
+            r.ok("root call caches")
+        else:
+            r.fail("root call caches", "\n".join(body(n) for n in ("pair", "outer", "mixed", "direct")))
+    r.show_task(root_call_caches)
+    # A root reference the callee only projects or forwards arrives as its
+    # descriptor's members; one it returns, stores or captures, or that is
+    # forwarded to such a callee, as the descriptor's address.
+    def root_split_params():
+        for opt in (0, 2):
+            cfile = gendir / f"root_split_params-O{opt}-shapes.c"
+            code, out, err = r.goose(f"-O{opt}", "-o", cfile, HERE / "codegen" / "root_split_params.goose")
+            if code != 0:
+                r.fail(f"root split params O{opt}", out + err)
+                continue
+            text = cfile.read_text()
+            sigs = {m[1]: m[2] for m in re.finditer(r"^static [^\n;(]*\b(\w+?)_g(?:_\d+)?\(([^\n]*)\) \{$",
+                                                    text, re.MULTILINE)}
+            split = ("fill", "forward", "aliased", "deep")
+            whole = ("via_same", "stored", "captured")
+            ok = all(n in sigs and "_first_g_hdr" in sigs[n] and "r_S_g" not in sigs[n] for n in split)
+            ok &= all(n in sigs and "r_S_g s_g" in sigs[n] and "_first_g_hdr" not in sigs[n] for n in whole)
+            if ok:
+                r.ok(f"root split params O{opt}")
+            else:
+                r.fail(f"root split params O{opt}", "\n".join(f"{n}: {s}" for n, s in sigs.items()))
+    r.show_task(root_split_params)
     # Fields nothing can move are member stores, not stores through a
     # pointer taken first (StableDest).
     def member_stores():
@@ -1766,7 +1953,8 @@ def main():
             r.ok(f"member stores {f.name}")
     r.show_task(member_stores)
     # A constant array of listed elements is static data at any length, and
-    # a long fill keeps its runtime initialization (MAXSTATICELEMS).
+    # a long fill keeps its runtime initialization (MAXSTATICELEMS), in a
+    # static of its own outside the globals struct.
     def static_arrays():
         f = HERE / "codegen" / "const_global_folding.goose"
         cfile = gendir / "const_global_folding-static.c"
@@ -1776,16 +1964,34 @@ def main():
             return
         text = cfile.read_text()
         listed = re.search(r"^static const a260_i64 LONG_g\w* = ", text, re.MULTILINE)
-        filled = re.search(r"^static const \w+ FILLED_g", text, re.MULTILINE)
-        if not listed or filled:
+        filled = re.search(r"^static a300_i64 FILLED_g\w*;$", text, re.MULTILINE)
+        if not listed or not filled or "GS_GL->FILLED_g" in text:
             r.fail(f"static arrays {f.name}",
-                   f"LONG static: {bool(listed)}, FILLED static: {bool(filled)}")
+                   f"LONG static: {bool(listed)}, FILLED shared: {bool(filled)}")
         else:
             r.ok(f"static arrays {f.name}")
     r.show_task(static_arrays)
+    # A constant fill or string past MAXSTATICELEMS is a static of its own,
+    # read in place by every worker rather than copied at spawn (§11.2).
+    def shared_fills():
+        f = HERE / "threads" / "thread_shared_fills.goose"
+        cfile = gendir / "thread_shared_fills-shared.c"
+        code, out, err = r.goose("-O1", "-o", cfile, f)
+        if code != 0:
+            r.fail(f"shared fills {f.name}", out + err)
+            return
+        text = cfile.read_text()
+        bad = [n for n in ("TABLE", "ZEROS", "TEXT")
+               if not re.search(rf"^static \w+ {n}_g\w*;$", text, re.MULTILINE) or
+                  f"GS_GL->{n}_g" in text]
+        if bad:
+            r.fail(f"shared fills {f.name}", "copied or not static: " + ", ".join(bad))
+        else:
+            r.ok(f"shared fills {f.name}")
+    r.show_task(shared_fills)
 
     # Every annotated regression, including the expected-abort cases. These
-    # describe the default O1 pass; O0/O2 execution checks semantics.
+    # describe the O1 pass; O0/O2 execution checks semantics.
     r.section("bounds-check annotations")
     for f in tests:
         r.show(lambda f=f: fixtures[f].result().bce)
@@ -1814,11 +2020,11 @@ def main():
         # Algebraic properties of the compiler's root domain are easier to
         # exhaust over small abstract states than to express in Goose, and
         # its containers to compare with the standard ones directly.
-        def compiler_unit(name):
+        def compiler_unit(name, sources=(), flags=()):
             out_exe = gendir / f"{name}{tc.EXE_SUFFIX}"
-            ok, log = cc.compile(HERE / f"{name}.cpp", out_exe, cpp=True,
+            ok, log = cc.compile([HERE / f"{name}.cpp", *sources], out_exe, cpp=True,
                                  opt=2 if args.profile == "baseline" else 1,
-                                 extra=extra, log=gendir / f"{name}.cc.log")
+                                 extra=[*extra, *flags], log=gendir / f"{name}.cc.log")
             if not ok:
                 r.fail(f"compiler-cc {name}", log)
             else:
@@ -1829,6 +2035,10 @@ def main():
                     r.ok(f"compiler {name}")
         for name in ("compiler_roots", "compiler_containers"):
             r.show_task(compiler_unit, name)
+        r.show_task(compiler_unit, "compiler_process",
+                    [HERE.parent / "src" / name for name in ("process.cpp", "progress.cpp")],
+                    [("/I" if cc.style == "msvc" else "-I") +
+                     str(HERE.parent / "third_party" / "subprocess")])
 
         # Direct runtime lifecycle checks use small region limits and allocator
         # instrumentation that cannot be expressed by a Goose program. Keep
@@ -1847,6 +2057,31 @@ def main():
                     r.ok(f"runtime {name}")
         r.show_task(runtime_lifecycle, "runtime_threads_lifecycle", "threads")
         r.show_task(runtime_lifecycle, "runtime_trim_memory", "runtime")
+
+        # A library build's C host: goose_exit ends the program and goose_init
+        # starts it again over fresh globals and queues, and ending it while a
+        # worker still runs is a runtime error.
+        def host_exit():
+            src = HERE / "threads" / "host_exit.goose"
+            cfile = gendir / "host_exit.c"
+            code, out, err = r.goose("-O1", "--header", gendir / "host_exit.h", "-o", cfile, src)
+            if code != 0:
+                r.fail("host-exit cgen host_exit.goose", out + err)
+                return
+            # Beside the header it includes.
+            host = gendir / "host_exit_main.c"
+            shutil.copyfile(HERE / "threads" / "host_exit.c", host)
+            out_exe = gendir / f"host_exit{tc.EXE_SUFFIX}"
+            ok, log = cc.compile([host, cfile], out_exe, opt=1, extra=extra, strict_decls=True,
+                                 runtime=r.runtime, log=gendir / "host_exit.cc.log")
+            if not ok:
+                r.fail("host-exit cc host_exit", "\n".join(log.splitlines()[:8]))
+                return
+            for name, argv in (("host_exit_c", []), ("host_exit_live", ["live"])):
+                out = r.run_expected([out_exe] + argv, name, name)
+                if out is not None and r.check_stdout(name, name, out):
+                    r.ok(f"host {name}")
+        r.show_task(host_exit)
 
         # The same coverage test through clang, release and debug. A compiler
         # that accepts more C than the standard does is not what checks the
@@ -2207,9 +2442,13 @@ def main():
         nowhere = gendir / "nowhere"
         nowhere.mkdir(exist_ok=True)
         env = {k: v for k, v in os.environ.items()
-               if k.upper() not in ("GOOSE_CC", "PATH", "PROGRAMFILES(X86)")}
-        # Nothing on PATH, and no Visual Studio where vswhere would be.
+               if k.upper() not in ("GOOSE_CC", "PATH", "PROGRAMFILES", "PROGRAMW6432",
+                                     "PROGRAMFILES(X86)")}
+        # Nothing on PATH, no Visual Studio where vswhere would be, and no
+        # LLVM where its installer puts it. Windows gives a 64-bit process
+        # ProgramFiles from ProgramW6432, so that one is hidden too.
         env.update({"PATH": str(nowhere), "GOOSE_HOME": str(nowhere / "home"),
+                    "PROGRAMFILES": str(nowhere), "PROGRAMW6432": str(nowhere),
                     "PROGRAMFILES(X86)": str(nowhere)})
         nocc = subprocess.run([str(exe), "toolchain"], capture_output=True, text=True,
                               errors="replace", env=env)
@@ -2272,6 +2511,17 @@ def main():
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             r.fail("command line paths", str(e))
     r.show_task(cli_paths)
+
+    def emit_order():
+        from emit_order import check_emit_order
+        try:
+            n = check_emit_order(HERE.parent / "src")
+            r.ok(f"emit order: no two of the code generator's {n} emitting members in one "
+                 "unsequenced expression, so the C it writes is the same whichever C++ "
+                 "compiler built it")
+        except RuntimeError as e:
+            r.fail("emit order", str(e))
+    r.show_task(emit_order)
 
     def diagnostics_json():
         from diagnostics_json import check_diagnostics_json
@@ -2405,7 +2655,8 @@ def main():
         try:
             check_runtime_io(exe, gendir, jit=jit)
             r.ok("runtime io: stdin's bytes as they came, read_line into a builder holding a "
-                 "carriage return, write_file_atomic keeping a file's permissions")
+                 "carriage return, a NUL byte and a 70,000-byte line, write_file_atomic "
+                 "keeping a file's permissions")
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             r.fail("runtime io", str(e))
     if cc:
