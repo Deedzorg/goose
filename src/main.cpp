@@ -143,7 +143,9 @@ vector<string> StdlibDirs(const string &stdlibdir, const string &exe) {
     for (auto &dir : cands) {
         std::error_code ec;
         auto canon = filesystem::weakly_canonical(filesystem::path(dir), ec);
-        if (seen.insert(ec ? dir : canon.string()).second) dirs.push_back(dir);
+        // Normalized: its files' paths are what diagnostics and runtime errors print.
+        if (seen.insert(ec ? dir : canon.string()).second)
+            dirs.push_back(filesystem::path(dir).lexically_normal().generic_string());
     }
     return dirs;
 }
@@ -611,13 +613,23 @@ void GenRuntimeHeader(const char *exe) {
         if (src.find(")GSRT\"") != string::npos)
             throw CompileError { cat(rf, " contains the raw-string delimiter )GSRT\"") };
         Append(out, "    { \"", rf, "\", string_view(\n");
-        // Chunked adjacent raw strings: MSVC caps single literals at ~16K.
+        // Blank-line boundaries keep chunks stable when earlier text changes.
+        // Older MSVC caps single literals at ~16K, so long paragraphs also split.
         size_t pos = 0;
         while (pos < src.size()) {
             auto end = std::min(pos + 8000, src.size());
-            if (end < src.size()) {
-                auto nl = src.rfind('\n', end);
-                if (nl != string::npos && nl > pos) end = nl + 1;
+            for (auto line = pos; line < end;) {
+                auto nl = src.find('\n', line);
+                if (nl == string::npos || nl >= end) break;
+                if (src.find_first_not_of(" \t\r", line) >= nl) {
+                    end = nl + 1;
+                    break;
+                }
+                line = nl + 1;
+            }
+            if (end < src.size() && src[end - 1] != '\n') {
+                auto nl = src.rfind('\n', end - 1);
+                if (nl != string::npos && nl >= pos) end = nl + 1;
             }
             Append(out, "R\"GSRT(", string_view(src).substr(pos, end - pos), ")GSRT\"\n");
             pos = end;
@@ -775,7 +787,8 @@ R"(usage: goose format [--check] file.goose|dir...
        goose format [-]
 
 Rewrites each file in the standard layout, in place: indentation, the
-spaces between tokens, blank lines and trailing commas. Line breaks stay
+spaces between tokens, blank lines and trailing commas, with the types
+and =s of a run of declarations lined up in columns. Line breaks stay
 where they are. A directory stands for the .goose files under it, less
 those in directories whose names start with a dot and in build trees. With
 no files, or -, it formats standard input to standard output. A file that
@@ -856,8 +869,9 @@ the program at hand.
 Options:
   -o out.c              Write the program's C rather than run it.
   --standalone          Write C that holds the whole runtime and builds alone.
-  --header out.h        Also write a header for a C host, which supplies main
-                        and starts the program through goose_init.
+  --header out.h        Also write a header for a C host, which supplies main,
+                        starts the program through goose_init and may end it
+                        through goose_exit.
   --include header.h    Have the C include this header (may be repeated).
   --jit                 Also run the program in this process.
   --emit-runtime out.c  Write the runtime's C.
@@ -1533,7 +1547,7 @@ int Main(int argc, char **argv) {
         return 1;
     }
     // A header is for a C host, which supplies its own main and starts the
-    // program through goose_init.
+    // program through goose_init (and may end it through goose_exit).
     auto library = !headername.empty();
     if (multitest && (tokens || !dumpfile.empty() || !progargs.empty() ||
                       (!outname.empty() && outname.find('%') == string::npos) ||
@@ -1657,6 +1671,11 @@ int Main(int argc, char **argv) {
         // --stacks needs the generated program's bounds, so --check runs
         // the backend for them and writes nothing.
         if (nocgen && !stacks) return 0;
+        // Sidecar headers share --include's position after generated types.
+        // They belong to every loaded package, not just those with a native
+        // part: a header-only adapter needs no separate compilation or loading.
+        for (auto &pkg : ast.packages)
+            includes.insert(includes.end(), pkg.cheaders.begin(), pkg.cheaders.end());
         // A quoted include resolves against the including file's own directory
         // first, so the --include headers are written relative to where the .c
         // goes: the generated file then compiles wherever the tree sits,

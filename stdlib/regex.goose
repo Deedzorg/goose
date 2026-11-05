@@ -90,23 +90,23 @@ struct Prefilter { len: i64, at1: i64, at2: i64, set1: ByteSet, set2: ByteSet }
 struct Place { start: i64, start_back: bool, end: i64, end_back: bool }
 
 struct Regex {
-    groups: i64,            // capture groups, group 0 being the whole match
+    groups:   i64,          // capture groups, group 0 being the whole match
     nullable: bool,         // whether the empty string matches
-    placed: bool,           // whether every group has a fixed place
-    entry: i32,             // where the program starts an anchored match
-    classes: u8[256],       // byte -> its column in the DFAs
-    skip: Skip,
-    filter: Prefilter,
+    placed:   bool,         // whether every group has a fixed place
+    entry:    i32,          // where the program starts an anchored match
+    classes:  u8[256],      // byte -> its column in the DFAs
+    skip:     Skip,
+    filter:   Prefilter,
     // The inner byte: every match has a byte of `inner` right after a part
     // that holds none, so a match can only start where the reverse DFA of
     // that part, `before`, run back from such a byte, matches.
-    inner: ByteSet,
-    fwd: Dfa,               // unanchored and leftmost-first: finds match ends
-    rev: Dfa,               // the reversed pattern, anchored: finds match starts
+    inner:  ByteSet,
+    fwd:    Dfa,            // unanchored and leftmost-first: finds match ends
+    rev:    Dfa,            // the reversed pattern, anchored: finds match starts
     before: Dfa,
     places: Place[],
-    prog: Inst[],
-    sets: (bool[256])[],
+    prog:   Inst[],
+    sets:   (bool[256])[],
 }
 
 // --- byte sets -----------------------------------------------------------------
@@ -114,8 +114,6 @@ struct Regex {
 fn add_range(s: bool[256]&, lo: u8, hi: u8) {
     for b in (lo as i64)..(hi as i64) + 1 { s[b] = true; }
 }
-
-fn is_letter(b: u8) -> bool { (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') }
 
 // Adds the other case of every ASCII letter in the set.
 fn fold_case(s: bool[256]&) {
@@ -156,14 +154,7 @@ fn escaped_byte(c: u8) -> i64 {
     if c == 'r' { return '\r'; }
     if c == 'f' { return 0x0c; }
     if c == 'v' { return 0x0b; }
-    if c >= 0x21 && c < 0x7f && !is_letter(c) && !(c >= '0' && c <= '9') { return c; }
-    return -1;
-}
-
-fn hex_value(c: u8) -> i64 {
-    if c >= '0' && c <= '9' { return c - '0'; }
-    if c >= 'a' && c <= 'f' { return c - 'a' + 10; }
-    if c >= 'A' && c <= 'F' { return c - 'A' + 10; }
+    if c >= 0x21 && c < 0x7f && !ascii::is_alnum(c) { return c; }
     return -1;
 }
 
@@ -190,13 +181,13 @@ fn nothing() -> Regex {
     return Regex {
         groups: 1, nullable: false, placed: false, entry: 0, classes: [0; 256], skip: Skip.Scan,
         filter: Prefilter { len: 0, at1: 0, at2: 0, set1: none, set2: none }, inner: none,
-        fwd: dead, rev: dead, before: dead, places: [], prog: [Inst.Match], sets: [],
+        fwd:    dead, rev: dead, before: dead, places: [], prog: [Inst.Match], sets: [],
     };
 }
 
 fn build(pattern: u8[:], err: u8[>..]&, aborts: bool) -> Regex {
-    var nodes: Node[>..] = [];
-    var sets: (bool[256])[>..] = [];
+    var nodes: Node[>..]        = [];
+    var sets:  (bool[256])[>..] = [];
     var pos = 0;
     var fold = false;           // (?i): letters match either case
     var dot_nl = false;         // (?s): `.` matches a newline too
@@ -236,7 +227,7 @@ fn build(pattern: u8[:], err: u8[>..]&, aborts: bool) -> Regex {
     fn number() -> i32 {
         let start = pos;
         var v = 0;
-        while more() && pattern[pos] >= '0' && pattern[pos] <= '9' {
+        while more() && ascii::is_digit(pattern[pos]) {
             v = v * 10 + (pattern[pos] - '0');
             guard v <= MAX_REPEAT else { return fail("repetition count too large"); }
             pos++;
@@ -253,10 +244,10 @@ fn build(pattern: u8[:], err: u8[>..]&, aborts: bool) -> Regex {
         let c = pattern[pos];
         pos++;
         if c == 'x' {
-            guard pos + 2 <= pattern.len && hex_value(pattern[pos]) >= 0 && hex_value(pattern[pos + 1]) >= 0 else {
+            guard pos + 2 <= pattern.len && ascii::hex_value(pattern[pos]) >= 0 && ascii::hex_value(pattern[pos + 1]) >= 0 else {
                 return fail_at("bad \\x escape", at) as! u8;
             }
-            let v = hex_value(pattern[pos]) * 16 + hex_value(pattern[pos + 1]);
+            let v = ascii::hex_value(pattern[pos]) * 16 + ascii::hex_value(pattern[pos + 1]);
             pos += 2;
             return v as u8;
         }
@@ -606,7 +597,7 @@ fn build(pattern: u8[:], err: u8[>..]&, aborts: bool) -> Regex {
     let root = parse_alt();
     if more() { fail("unmatched )"); }
 
-    var prog: Inst[>..] = [];
+    var prog:  Inst[>..] = [];
     var rprog: Inst[>..] = [];
     let top = add(Node.Group { sub: root, index: 0 });
     let entry = emit(prog, top, push(prog, Inst.Match), false);
@@ -671,20 +662,20 @@ fn build(pattern: u8[:], err: u8[>..]&, aborts: bool) -> Regex {
     let scans = skip != Skip.Scan;
     var too_big = false;
     let re = Regex {
-        groups: groups,
+        groups:   groups,
         nullable: prefix.len == 0,
-        placed: placed,
-        entry: entry,
-        classes: classes,
-        skip: skip,
-        filter: filter,
-        inner: byte_set(inner),
-        fwd: build_dfa(prog, sets, classes, head, true, scans, too_big),
-        rev: build_dfa(rprog, sets, classes, rentry, false, false, too_big),
-        before: build_dfa(bprog, sets, classes, bentry, false, false, too_big),
-        places: copy(places),
-        prog: copy(prog),
-        sets: copy(sets),
+        placed:   placed,
+        entry:    entry,
+        classes:  classes,
+        skip:     skip,
+        filter:   filter,
+        inner:    byte_set(inner),
+        fwd:      build_dfa(prog, sets, classes, head, true, scans, too_big),
+        rev:      build_dfa(rprog, sets, classes, rentry, false, false, too_big),
+        before:   build_dfa(bprog, sets, classes, bentry, false, false, too_big),
+        places:   copy(places),
+        prog:     copy(prog),
+        sets:     copy(sets),
     };
     if too_big { stop(str("regex: the pattern's DFA would be too large: ", pattern)); }
     return re;
@@ -696,12 +687,12 @@ fn build(pattern: u8[:], err: u8[>..]&, aborts: bool) -> Regex {
 // set of bytes at offset j, for every offset a match always reaches (up to
 // MAX_PREFIX of them). Empty when the empty string matches.
 fn prefix_sets(prog: Inst[:], sets: (bool[256])[:], entry: i32) -> (bool[256])[>..] {
-    var out: (bool[256])[>..] = [];
-    var front: i32[>..] = [];       // the Byte instructions a thread can be at
-    var next: i32[>..] = [];
-    var seen: i32[>..] = [];
+    var out:   (bool[256])[>..] = [];
+    var front: i32[>..]         = []; // the Byte instructions a thread can be at
+    var next:  i32[>..]         = [];
+    var seen:  i32[>..]         = [];
     seen.resize(prog.len, -1);
-    var round: i32 = 0;
+    var round: i32       = 0;
     var stack: i32[>..<] = [];
 
     // Adds the Byte instructions pc leads to without consuming a byte to
@@ -793,7 +784,7 @@ fn byte_classes(sets: (bool[256])[:]) -> u8[256] {
     var classes: u8[256] = [0; 256];
     for &s in sets {
         var split: i32[512] = [-1; 512];    // (class, in s) -> refined class
-        var n: i32 = 0;
+        var n:     i32      = 0;
         for b in 256 {
             let k = classes[b] as i64 * 2 + (if s[b] { 1 } else { 0 });
             if split[k] < 0 { split[k] = n; n++; }
@@ -819,19 +810,19 @@ fn build_dfa(prog: Inst[:], sets: (bool[256])[:], classes: u8[256], start_pc: i3
     for b in 256 { if classes[b] == reps.len { reps.push(b as u8); } }
     let stride = reps.len;
 
-    var lists: i32[>..] = [];       // every state's instructions, back to back
-    var bounds: i64[>..] = [0];     // state k's are lists[bounds[k]..bounds[k + 1]]
+    var lists:    i32[>..]  = [];   // every state's instructions, back to back
+    var bounds:   i64[>..]  = [0];  // state k's are lists[bounds[k]..bounds[k + 1]]
     var matching: bool[>..] = [];
-    var keys: u8[>..] = [];         // the same lists, encoded as dictionary keys
+    var keys:     u8[>..]   = [];   // the same lists, encoded as dictionary keys
     var index = dictionary<const u8[:], i32> {};
     var trans: i32[>..] = [];       // by state index, stride entries per state
 
     var list: i32[>..] = [];        // the state being made
     var matched = false;
-    var probe: u8[>..] = [];
-    var seen: i32[>..] = [];
+    var probe: u8[>..]  = [];
+    var seen:  i32[>..] = [];
     seen.resize(prog.len, -1);
-    var round: i32 = 0;
+    var round: i32       = 0;
     var stack: i32[>..<] = [];
 
     // Adds the threads pc leads to without consuming a byte, in priority
@@ -922,10 +913,10 @@ fn build_dfa(prog: Inst[:], sets: (bool[256])[:], classes: u8[256], start_pc: i3
         for c in stride { table.push(number[trans[old * stride + c]] * width); }
     }
     return Dfa {
-        start: number[start] * width,
+        start:     number[start] * width,
         match_end: match_end as i32 * width,
-        special: special as i32 * width,
-        trans: copy(table),
+        special:   special as i32 * width,
+        trans:     copy(table),
     };
 }
 

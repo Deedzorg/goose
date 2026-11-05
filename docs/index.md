@@ -80,8 +80,9 @@ and the reference describe what was built; these say why.
   exit paths and `return … from`; a proposal.
 * [Nested growth](design/nested_growth.md): building a recursive tree
   (a JSON tape) in place on one stack by growing a container on the open
-  path; the type relaxations, append handles with a checked push, and the
-  static proofs that elide the check, compared.
+  path; the type relaxations, append handles with a checked push, the
+  static proofs that elide the check, and how the result is stepped
+  through without re-walking subtrees, compared.
 * [Standard library design](design/stdlib_design.md): the library's
   original scope and conventions.
 * [Compiler analyses](design/analysis_inventory.md): an inventory of the
@@ -98,6 +99,21 @@ and the reference describe what was built; these say why.
 * [Coroutines](design/coroutines.md): stackless coroutines whose frame is
   an ordinary fixed-size value, driven by `resume` and scheduled by
   libraries; what Rust, C++, Kotlin, Go and Zig learned; a proposal.
+* [Claims the compiler checks and spends](design/llm_frontier.md): where
+  the next frontier lies for code written by language models and reviewed
+  by people: contracts in the prover's own fact language, `abortfree`,
+  `pure`, a race-free `par for` by proof, owning pool handles, and what
+  each costs; a research note.
+* [Debugging](design/debugging.md): Goose source lines, names and values
+  in a debugger, through `#line` and a compiler-written map read by a
+  `goose dap` adapter in front of `lldb-dap`, compared with visualizers in
+  the native debuggers and with a debugger built into the compiler; a
+  proposal.
+* [Ownership without destructors](design/ownership.md): an `own`
+  qualifier that is an obligation the checker discharges, never a release
+  the compiler writes; what that costs against the existing non-copyable
+  class, how pools and coroutine frames would use it, and what it leaves
+  untouched; a research note.
 
 ## Getting the compiler
 

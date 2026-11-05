@@ -33,6 +33,13 @@ GOLDEN = [
      "{ let x = y as ! u8; let z = w [1 ..] [.. ^1]; }\n",
      "fn f(p: Node&<u32 in pool>, q: u8[:], r: i32[>..<], s: Shape..?, t: u8[..16]) "
      "{ let x = y as! u8; let z = w[1..][..^1]; }\n"),
+    ("root structs and component paths",
+     "root  struct State<T>{items:T[>..],scratch:i64[>..<]}\n"
+     "var pool=State<Node>{[],[]};\n"
+     "fn f(p:Node&<u32 in pool . items>,i:u32 in pool.items){let root=pool.items[i];}\n",
+     "root struct State<T> { items: T[>..], scratch: i64[>..<] }\n"
+     "var pool = State<Node> { [], [] };\n"
+     "fn f(p: Node&<u32 in pool.items>, i: u32 in pool.items) { let root = pool.items[i]; }\n"),
     ("imports, const for, initializers and qualified names",
      "import .a.b;\n"
      "fn f() { const for <k,v> in fields<P> { print(k); } let p = P{x:1,..}; let q = ::a + ns :: b; "
@@ -123,6 +130,19 @@ GOLDEN = [
     ("multi-line string moves with its line",
      'fn f() {\n  let s = """\n    text\n      \n    more\n    """;\n}\n',
      'fn f() {\n    let s = """\n      text\n        \n      more\n      """;\n}\n'),
+    ("a table of declarations lines up",
+     "const QUIC_FRAME_PADDING: u64 = 0x00;\nconst QUIC_FRAME_PING: u64 = 0x01;\n"
+     "const QUIC_FRAME_ACK:  u64 = 0x02;\nconst QUIC_FRAME_ACK_ECN: u64 = 0x03;\n"
+     "\nconst A: u8 = 1; // a\nconst BBBB: u64 = 2; // b\nconst C: Foo<i64> = 3;\n"
+     "struct P {\n    x: i64,\n    longer: u8, // c\n    z: Foo<T>,\n}\n"
+     "fn f() {\n    let p = P {\n        x: 1,\n        longer: 2,\n    };\n"
+     "    let a: i64 = 1;\n    let bbb: i64 = 1;\n    var c: i64 = 1;\n}\n",
+     "const QUIC_FRAME_PADDING: u64 = 0x00;\nconst QUIC_FRAME_PING:    u64 = 0x01;\n"
+     "const QUIC_FRAME_ACK:     u64 = 0x02;\nconst QUIC_FRAME_ACK_ECN: u64 = 0x03;\n"
+     "\nconst A:    u8       = 1; // a\nconst BBBB: u64      = 2; // b\nconst C:    Foo<i64> = 3;\n"
+     "struct P {\n    x:      i64,\n    longer: u8, // c\n    z:      Foo<T>,\n}\n"
+     "fn f() {\n    let p = P {\n        x:      1,\n        longer: 2,\n    };\n"
+     "    let a:   i64 = 1;\n    let bbb: i64 = 1;\n    var c: i64 = 1;\n}\n"),
     ("a table of statements after semicolons",
      "let a = 1;      let b = 2;\nlet cc = 3;     let d = 4;\n",
      None),

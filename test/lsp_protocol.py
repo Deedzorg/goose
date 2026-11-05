@@ -235,12 +235,20 @@ def check_lsp_protocol(exe, base):
                         got["activeParameter"] != int(active)):
                     fail(f"signature {pos}", got)
             elif kind == "complete":
-                # `complete L:C has NAME` / `lacks NAME`: the labels offered.
-                pos, mode, name = rest.split()
+                # `has NAME` / `lacks NAME`: labels; optional text checks detail.
+                # `inserts NAME`: the item inserts that spelling, as a client would.
+                pos, mode, name, detail = re.match(r'(\S+) (has|lacks|inserts) (\S+)(?: "(.*)")?$', rest).groups()
                 got = client.request("textDocument/completion", {**doc, "position": position(pos)})
-                labels = {item["label"] for item in (got or {}).get("items", [])}
-                if (name in labels) != (mode == "has"):
-                    fail(f"completion {pos} {mode} {name}", sorted(labels))
+                items = {item["label"]: item for item in (got or {}).get("items", [])}
+                if mode == "inserts":
+                    item = items.get(name, {})
+                    insert = item.get("textEdit", {}).get("newText", item.get("insertText", item.get("label")))
+                    if insert != name:
+                        fail(f"completion {pos} inserts {name}", item)
+                elif (name in items) != (mode == "has"):
+                    fail(f"completion {pos} {mode} {name}", sorted(items))
+                if detail and detail not in items[name].get("detail", ""):
+                    fail(f"completion {pos} {name}'s detail lacks {detail}", items[name])
             elif kind == "token":
                 # `none`: no token at the place.
                 pos, want = rest.split()
@@ -404,6 +412,25 @@ def check_lsp_protocol(exe, base):
     client.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 7},
                                            "contentChanges": [{"text": text}]}, request=False)
     client.diagnostics_for(main_uri, lambda d: len(d) == 0)
+    # An incremental edit (a range plus its fragment, as a client with
+    # incremental sync sends) applies where the range says, and never
+    # reads as the whole file: the line it adds above shifts the hint
+    # below it down by one. The sleep lets the debounce and the analysis
+    # run, so the hints answer from them rather than from the analysis
+    # before the edit (which a client taking the refresh is served).
+    client.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 8},
+                                           "contentChanges": [{"range": {
+                                               "start": {"line": 0, "character": 0},
+                                               "end": {"line": 0, "character": 0}},
+                                               "text": "// a comment above\n"}]}, request=False)
+    time.sleep(2)
+    got = client.request("textDocument/inlayHint", {**doc, "range": {
+        "start": {"line": 0, "character": 0}, "end": {"line": len(text.splitlines()) + 1, "character": 0}}})
+    if not any(h["position"] == position("31:10") and h["label"] == ": Point" for h in got or []):
+        fail("hint after an incremental edit", got)
+    client.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 9},
+                                           "contentChanges": [{"text": text}]}, request=False)
+    client.diagnostics_for(main_uri, lambda d: len(d) == 0)
     # A program with errors in two functions, opened as a root of its own,
     # its symbols asked at once: they are its analysis's, not none from
     # before it. Both errors are published, and the queries answer from
@@ -445,6 +472,11 @@ def check_lsp_protocol(exe, base):
     complete = fixtures / "complete.goose"
     ctext = complete.read_text(encoding="utf-8")
     queries(complete, ctext, open_fixture(complete, ctext))
+    # Root structs and the stdlib pools: the generic functions taking an
+    # instantiation of a generic struct first are its value's members.
+    pools = fixtures / "pools.goose"
+    ptext = pools.read_text(encoding="utf-8")
+    queries(pools, ptext, open_fixture(pools, ptext))
     # Generic functions nothing calls, which the server checks as exemplars:
     # the queries answer from them, and one whose body no binding could make
     # right reports nothing, as `goose check` does not (its errors_tc
